@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.guardianos.core.app-mergeDebugResources-41:/values-night-v8/values-night-v8.xml",
+            "map": [
+                {
+                    "source": "/home/victor/.gradle/caches/transforms-3/e8166dc773573e9a037c740a12c0f395/transformed/jetified-core-splashscreen-1.0.1/res/values-night-v8/values-night-v8.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "85",
+                        "endOffsets": "136"
+                    }
+                }
+            ]
+        }
+    ]
+}

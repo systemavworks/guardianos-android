@@ -1,0 +1,23 @@
+🛡️ GuardianOS – Protección digital ética para menores
+
+¿Sabías que WhatsApp guarda copias sin cifrar? ¿Que Instagram accede a tus llamadas y contactos?
+
+GuardianOS es una herramienta gratuita y de código abierto que analiza tu dispositivo Android **sin enviar ningún dato a internet**. Detecta:
+
+• Apps con comportamiento de spyware o ransomware  
+• Permisos peligrosos (micrófono, ubicación, contactos)  
+• Rastreadores ocultos y firmas de malware conocido  
+• Configuraciones inseguras del sistema  
+
+✨ Características:
+- Auditoría 100% offline  
+- Informe PDF detallado  
+- Enfoque en protección de menores  
+- Código abierto y transparente  
+- Sin publicidad ni tracking  
+
+🔒 Todo el análisis se realiza localmente. No se envía ninguna información personal ni datos de apps a servidores externos.
+
+Desarrollado en Sevilla, Andalucía, por Víctor Shift Lara.
+
+Versión 1.0.0 – 2026

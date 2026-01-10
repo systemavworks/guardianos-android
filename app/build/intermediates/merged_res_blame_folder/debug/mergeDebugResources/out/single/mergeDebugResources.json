@@ -1,0 +1,10 @@
+[
+    {
+        "merged": "com.guardianos.core.app-debug-43:/xml_file_paths.xml.flat",
+        "source": "com.guardianos.core.app-main-45:/xml/file_paths.xml"
+    },
+    {
+        "merged": "com.guardianos.core.app-debug-43:/mipmap-xxxhdpi_ic_launcher.png.flat",
+        "source": "com.guardianos.core.app-main-45:/mipmap-xxxhdpi/ic_launcher.png"
+    }
+]
