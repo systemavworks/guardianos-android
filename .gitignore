@@ -1,25 +1,20 @@
-# Android
-/app/build/
+# Android / Gradle
 .gradle/
-local.properties
+build/
+app/build/
 *.apk
 *.ap_
-*.aab
-
-# Gradle
-gradle/wrapper/gradle-wrapper.jar
+*.jks
+*.keystore
 
 # IDE
 .idea/
-.vscode/
 *.iml
+.DS_Store
 
-# Logs y temporales
-*.log
-*.tmp
-*.temp
+# Fastlane (opcional, pero no necesario ignorar)
+# fastlane/
 
-# Backups
-*.backup
-*.old
-*.orig
+# Otros
+/local.properties
+/captures/

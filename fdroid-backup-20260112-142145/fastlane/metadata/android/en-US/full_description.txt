@@ -1,0 +1,23 @@
+🛡️ GuardianOS – Ethical digital protection for minors
+
+Did you know WhatsApp stores unencrypted backups? That Instagram accesses your calls and contacts?
+
+GuardianOS is a free and open-source tool that audits your Android device **without sending any data to the internet**. It detects:
+
+• Apps with spyware or ransomware behavior  
+• Dangerous permissions (microphone, location, contacts)  
+• Hidden trackers and known malware signatures  
+• Insecure system configurations  
+
+✨ Features:
+- 100% offline audit  
+- Detailed PDF report  
+- Focus on child protection  
+- Open-source and transparent  
+- No ads, no tracking  
+
+🔒 All analysis happens locally. No personal data or app info is sent to external servers.
+
+Developed in Seville, Andalusia, by Víctor Shift Lara.
+
+Version 1.0.0 – 2026
