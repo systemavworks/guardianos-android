@@ -1,5 +1,5 @@
 # GuardianOS
-
+[🇬🇧 Read this README in English](README.en.md)
 > **Auditoría ética local para la protección digital de menores**
 
 [![License: GPL v3](https://img.shields.io/badge/Licencia-GPLv3-blue.svg)](LICENSE)
