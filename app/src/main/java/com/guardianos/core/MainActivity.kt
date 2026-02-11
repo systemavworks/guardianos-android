@@ -24,6 +24,7 @@ import com.guardianos.core.audit.ISOAuditor
 import com.guardianos.core.domain.model.ISOViolation
 import com.guardianos.core.audit.detector.StalkerwareDetector
 import com.guardianos.core.monitor.GuardianShieldMonitor
+import com.guardianos.core.monitor.GuardianShieldService
 import com.guardianos.core.monitor.PermissionAccessInfo
 import com.guardianos.core.monitor.RealTimePermissionMonitor
 import com.guardianos.core.monitor.ui.PermissionTransparencyDashboard
@@ -896,7 +897,13 @@ class MainActivity : ComponentActivity() {
                         "transparency" -> PermissionTransparencyDashboard(
                             context = context,
                             monitor = permissionMonitor,
-                            onBack = { currentScreen = "home" }
+                            onBack = { currentScreen = "home" },
+                            onViewHistory = { currentScreen = "guardian_shield_history" }
+                        )
+                        
+                        // Guardian Shield - Historial completo
+                        "guardian_shield_history" -> GuardianShieldHistoryScreen(
+                            onBack = { currentScreen = "transparency" }
                         )
                         "cta_iso" -> ProFeatureCTA(onUpgrade = { currentScreen = "pro_payment" })
                         "cta_network" -> ProFeatureCTA(onUpgrade = { currentScreen = "pro_payment" })
@@ -1053,13 +1060,20 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     if (!isPro) {
-                        Button(
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(
                             onClick = onActivatePro,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF5D8BF4)
-                            )
+                            modifier = Modifier.height(36.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = Color(0xFF5D8BF4)
+                            ),
+                            border = BorderStroke(1.dp, Color(0xFF5D8BF4))
                         ) {
-                            Text("Activar PRO • 9,99€")
+                            Text(
+                                text = "PRO 9.99€",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
@@ -2869,8 +2883,9 @@ class MainActivity : ComponentActivity() {
     fun GuardianShieldScreen(
         context: Context,
         isActive: Boolean,
-       onToggle: (Boolean) -> Unit,
-        onBack: () -> Unit
+        onToggle: (Boolean) -> Unit,
+        onBack: () -> Unit,
+        onViewHistory: () -> Unit
     ) {
         val monitor = remember { GuardianShieldMonitor(context) }
         var hasPermission by remember { mutableStateOf(monitor.hasUsageStatsPermission()) }
@@ -2908,7 +2923,7 @@ class MainActivity : ComponentActivity() {
             // Card de estado
             Card(
                 modifier = Modifier.fillMaxWidth(),
-               colors = CardDefaults.cardColors(
+                colors = CardDefaults.cardColors(
                     containerColor = if (isActive) 
                         Color(0xFF10B981).copy(alpha = 0.15f)
                     else 
@@ -2933,7 +2948,7 @@ class MainActivity : ComponentActivity() {
                             )
                             Text(
                                 text = if (isActive) 
-                                    "Monitorizando cada 30s" 
+                                    "Monitorizando apps al abrirse" 
                                 else 
                                     "Toca el switch para activar",
                                 fontSize = 12.sp,
@@ -2969,10 +2984,10 @@ class MainActivity : ComponentActivity() {
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        text = "Guardian Shield verifica con AppOpsManager qué permisos sensibles (cámara, micrófono, ubicación, contactos, SMS) " +
-                                "tienen REALMENTE CONCEDIDOS las apps de terceros.\n\n" +
-                                "Solo alerta sobre apps no-sistema con permisos verificados como activos. " +
-                                "No genera falsos positivos por permisos solo declarados pero no concedidos.",
+                        text = "Guardian Shield detecta cuando ABRES una app (WhatsApp, Instagram, TikTok, etc.) y te notifica " +
+                                "si tiene permisos sensibles concedidos (cámara, micrófono, ubicación, contactos, SMS).\n\n" +
+                                "Análisis en tiempo real: chequeo cada 5 segundos. Todas las detecciones se guardan en el historial.\n\n" +
+                                "100% local - Sin envío de datos a servidores externos.",
                         fontSize = 14.sp,
                         color = Color.Gray,
                         lineHeight = 20.sp
@@ -3001,7 +3016,7 @@ class MainActivity : ComponentActivity() {
                         Spacer(Modifier.width(12.dp))
                         Column {
                             Text(
-                               text = "Permiso de Estadísticas de Uso",
+                                text = "Permiso de Estadísticas de Uso",
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -3159,7 +3174,40 @@ class MainActivity : ComponentActivity() {
             
             Spacer(Modifier.height(16.dp))
             
-            // Botón volver
+            // Botón para ver historial completo guardado
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF5D8BF4).copy(alpha = 0.15f)
+                ),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF5D8BF4))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onViewHistory() }
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "📚 Historial Completo",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF5D8BF4)
+                        )
+                        Text(
+                            text = "Ver todas las detecciones guardadas por GuardianShield",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                    Text("➡️", fontSize = 24.sp)
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
             Button(
                 onClick = onBack,
                 modifier = Modifier.fillMaxWidth(),
@@ -3243,6 +3291,191 @@ class MainActivity : ComponentActivity() {
             diff < 3600000 -> "Hace ${diff / 60000} min"
             diff < 86400000 -> "Hace ${diff / 3600000} h"
             else -> "Hace ${diff / 86400000} días"
+        }
+    }
+    
+    @Composable
+    fun GuardianShieldHistoryScreen(
+        onBack: () -> Unit
+    ) {
+        val history = remember { GuardianShieldService.getPermissionAccessHistory(this@MainActivity) }
+        var searchQuery by remember { mutableStateOf("") }
+        
+        val filteredHistory: List<String> = remember(searchQuery, history) {
+            if (searchQuery.isBlank()) {
+                history
+            } else {
+                history.filter { entry -> entry.contains(searchQuery, ignoreCase = true) }
+            }
+        }
+        
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "📚 Historial Completo",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            // Buscador
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Buscar app o permiso...") },
+                leadingIcon = { Text("🔍") },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQuery = "" }) {
+                            Text("✖️", fontSize = 14.sp)
+                        }
+                    }
+                },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Color(0xFF5D8BF4),
+                    unfocusedBorderColor = Color.Gray
+                )
+            )
+            
+            Spacer(Modifier.height(16.dp))
+            
+            // Contador
+            Text(
+                text = if (filteredHistory.isEmpty()) 
+                    "Sin registros guardados" 
+                else 
+                    "${filteredHistory.size} ${if (filteredHistory.size == 1) "registro" else "registros"}",
+                fontSize = 14.sp,
+                color = Color.Gray,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            
+            // Lista de accesos
+            if (filteredHistory.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(vertical = 48.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text("📭", fontSize = 64.sp)
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        text = if (searchQuery.isBlank()) 
+                            "Historial vacío" 
+                        else 
+                            "No se encontraron resultados",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = if (searchQuery.isBlank())
+                            "Los accesos detectados por GuardianShield aparecerán aquí"
+                        else
+                            "Intenta con otro término de búsqueda",
+                        fontSize = 14.sp,
+                        color = Color.Gray,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(filteredHistory.size) { index ->
+                        val entry = filteredHistory[index]
+                        
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Icono según tipo de permiso
+                                val icon = when {
+                                    entry.contains("cámara", ignoreCase = true) -> "📷"
+                                    entry.contains("micrófono", ignoreCase = true) -> "🎤"
+                                    entry.contains("ubicación", ignoreCase = true) -> "📍"
+                                    entry.contains("contactos", ignoreCase = true) -> "👥"
+                                    entry.contains("SMS", ignoreCase = true) -> "💬"
+                                    entry.contains("llamadas", ignoreCase = true) -> "📞"
+                                    entry.contains("teléfono", ignoreCase = true) -> "📞"
+                                    else -> "🔒"
+                                }
+                                
+                                Text(icon, fontSize = 28.sp)
+                                Spacer(Modifier.width(12.dp))
+                                
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = entry,
+                                        fontSize = 13.sp,
+                                        lineHeight = 18.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            
+            // Botones
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (history.isNotEmpty()) {
+                    OutlinedButton(
+                        onClick = {
+                            // Limpiar historial
+                            this@MainActivity.getSharedPreferences("guardian_shield_log", Context.MODE_PRIVATE)
+                                .edit()
+                                .remove("access_log")
+                                .apply()
+                            
+                            Toast.makeText(this@MainActivity, "Historial borrado", Toast.LENGTH_SHORT).show()
+                            onBack()
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = Color(0xFFEF4444)
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444))
+                    ) {
+                        Text("🗑️ Limpiar")
+                    }
+                }
+                
+                Button(
+                    onClick = onBack,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF6B7280)
+                    )
+                ) {
+                    Text("Volver")
+                }
+            }
         }
     }
 

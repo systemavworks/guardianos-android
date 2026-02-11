@@ -38,6 +38,12 @@ class GuardianShieldMonitor(private val context: Context) {
         val apps: List<String>
     )
     
+    data class OpenedAppInfo(
+        val packageName: String,
+        val appName: String,
+        val lastOpenedTime: Long
+    )
+    
     // Apps legítimas del sistema que generarían spam de notificaciones
     private val WHITELIST_PACKAGES = setOf(
         "com.android.systemui",
@@ -96,10 +102,16 @@ class GuardianShieldMonitor(private val context: Context) {
      * @param hoursBack Horas hacia atrás a consultar (por defecto 24h)
      * @return Lista de accesos a permisos verificados
      */
-    fun getRecentPermissionAccess(hoursBack: Int = 24): List<PermissionAccessInfo> {
+    fun getRecentPermissionAccess( hoursBack: Int = 24): List<PermissionAccessInfo> {
+        android.util.Log.d("GuardianShieldMonitor", "═══════════════════════════════════════════")
+        android.util.Log.d("GuardianShieldMonitor", "Buscando accesos de las últimas $hoursBack horas...")
+        
         if (!hasUsageStatsPermission()) {
+            android.util.Log.e("GuardianShieldMonitor", "❌ NO tenemos permiso PACKAGE_USAGE_STATS")
             return emptyList()
         }
+        
+        android.util.Log.i("GuardianShieldMonitor", "✓ Permiso PACKAGE_USAGE_STATS concedido")
         
         val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
         val endTime = System.currentTimeMillis()
@@ -109,21 +121,38 @@ class GuardianShieldMonitor(private val context: Context) {
         val pm = context.packageManager
         val processedApps = mutableSetOf<String>() // Evitar duplicados por app
         
+        var totalEventsProcessed = 0
+        var appsSkippedWhitelist = 0
+        var appsSkippedSystem = 0
+        var appsWithPermissions = 0
+        
         try {
             val events = usageStatsManager.queryEvents(startTime, endTime)
             val event = UsageEvents.Event()
             
             while (events.hasNextEvent()) {
                 events.getNextEvent(event)
+                totalEventsProcessed++
                 
                 if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
                     val packageName = event.packageName
                     
-                    // Saltar si ya procesamos esta app o está en whitelist
-                    if (processedApps.contains(packageName) || isWhitelisted(packageName)) continue
+                    // Saltar si ya procesamos esta app
+                    if (processedApps.contains(packageName)) continue
+                    
+                    // Verificar whitelist
+                    if (isWhitelisted(packageName)) {
+                        appsSkippedWhitelist++
+                        android.util.Log.d("GuardianShieldMonitor", "  ⊗ $packageName: En whitelist")
+                        continue
+                    }
                     
                     // Saltar apps del sistema
-                    if (isSystemApp(packageName)) continue
+                    if (isSystemApp(packageName)) {
+                        appsSkippedSystem++
+                        android.util.Log.d("GuardianShieldMonitor", "  ⊗ $packageName: App del sistema")
+                        continue
+                    }
                     
                     processedApps.add(packageName)
                     
@@ -132,10 +161,20 @@ class GuardianShieldMonitor(private val context: Context) {
                         val appName = pm.getApplicationLabel(appInfo).toString()
                         val uid = appInfo.uid
                         
+                        android.util.Log.d("GuardianShieldMonitor", "  → Analizando: $appName ($packageName)")
+                        
                         // VERIFICAR CON AppOpsManager qué permisos tiene REALMENTE CONCEDIDOS
                         val grantedSensitiveOps = getGrantedSensitiveOps(packageName, uid)
                         
+                        if (grantedSensitiveOps.isNotEmpty()) {
+                            appsWithPermissions++
+                            android.util.Log.i("GuardianShieldMonitor", "    ✓ Tiene ${grantedSensitiveOps.size} permisos concedidos")
+                        } else {
+                            android.util.Log.d("GuardianShieldMonitor", "    ⊗ Sin permisos sensibles concedidos")
+                        }
+                        
                         grantedSensitiveOps.forEach { (opStr, permissionGroup) ->
+                            android.util.Log.d("GuardianShieldMonitor", "      - $permissionGroup")
                             accesses.add(
                                 PermissionAccessInfo(
                                     appName = appName,
@@ -149,12 +188,21 @@ class GuardianShieldMonitor(private val context: Context) {
                             )
                         }
                     } catch (e: Exception) {
-                        // App no accesible
+                        android.util.Log.w("GuardianShieldMonitor", "  ⊗ Error al analizar $packageName: ${e.message}")
                     }
                 }
             }
+            
+            android.util.Log.i("GuardianShieldMonitor", "═══════════════════════════════════════════")
+            android.util.Log.i("GuardianShieldMonitor", "Resumen de escaneo:")
+            android.util.Log.i("GuardianShieldMonitor", "  Total eventos procesados: $totalEventsProcessed")
+            android.util.Log.i("GuardianShieldMonitor", "  Apps omitidas (whitelist): $appsSkippedWhitelist")
+            android.util.Log.i("GuardianShieldMonitor", "  Apps omitidas (sistema): $appsSkippedSystem")
+            android.util.Log.i("GuardianShieldMonitor", "  Apps con permisos: $appsWithPermissions")
+            android.util.Log.i("GuardianShieldMonitor", "  Accesos totales encontrados: ${accesses.size}")
+            android.util.Log.d("GuardianShieldMonitor", "═══════════════════════════════════════════")
         } catch (e: Exception) {
-            android.util.Log.e("GuardianShieldMonitor", "Error querying usage events", e)
+            android.util.Log.e("GuardianShieldMonitor", "❌ Error al consultar eventos", e)
         }
         
         return accesses.sortedByDescending { it.lastAccessTime }.take(100)
@@ -222,6 +270,110 @@ class GuardianShieldMonitor(private val context: Context) {
         return accesses
             .groupBy { it.permissionGroup }
             .mapValues { it.value.size }
+    }
+    
+    /**
+     * NUEVA ESTRATEGIA: Detecta apps que se ABRIERON recientemente.
+     * En lugar de chequear histórico de permisos usados (que AppOpsManager no da),
+     * detectamos cuando el usuario ABRE una app y alertamos de qué permisos tiene.
+     * 
+     * @param secondsBack Segundos hacia atrás a consultar (por defecto 10s)
+     * @return Lista de apps que se abrieron recientemente
+     */
+    fun getRecentlyOpenedApps(secondsBack: Int = 10): List<OpenedAppInfo> {
+        if (!hasUsageStatsPermission()) {
+            android.util.Log.e("GuardianShieldMonitor", "❌ NO tenemos permiso PACKAGE_USAGE_STATS")
+            return emptyList()
+        }
+        
+        try {
+            val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val endTime = System.currentTimeMillis()
+            val startTime = endTime - (secondsBack * 1000L)
+            
+            val events = usageStatsManager.queryEvents(startTime, endTime)
+            val openedApps = mutableMapOf<String, Long>() // packageName -> timestamp
+            val pm = context.packageManager
+            
+            while (events.hasNextEvent()) {
+                val event = UsageEvents.Event()
+                events.getNextEvent(event)
+                
+                // Solo nos interesan apps que pasaron a FOREGROUND (el usuario las abrió)
+                if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                    val packageName = event.packageName
+                    val timestamp = event.timeStamp
+                    
+                    // Guardar solo la más reciente de cada app
+                    if (!openedApps.containsKey(packageName) || timestamp > openedApps[packageName]!!) {
+                        openedApps[packageName] = timestamp
+                    }
+                }
+            }
+            
+            // Convertir a lista con info de apps
+            return openedApps.map { (packageName, timestamp) ->
+                val appName = try {
+                    val appInfo = pm.getApplicationInfo(packageName, 0)
+                    pm.getApplicationLabel(appInfo).toString()
+                } catch (e: Exception) {
+                    packageName // Fallback al package name
+                }
+                
+                OpenedAppInfo(
+                    packageName = packageName,
+                    appName = appName,
+                    lastOpenedTime = timestamp
+                )
+            }.sortedByDescending { it.lastOpenedTime } // Más recientes primero
+            
+        } catch (e: Exception) {
+            android.util.Log.e("GuardianShieldMonitor", "Error detectando apps abiertas: ${e.message}")
+            return emptyList()
+        }
+    }
+    
+    /**
+     * Obtiene lista de permisos SENSIBLES que una app tiene CONCEDIDOS.
+     * Usa AppOpsManager para verificar el estado REAL de cada permiso.
+     * 
+     * @param packageName Paquete de la app a verificar
+     * @return Lista de permisos sensibles concedidos (ej: ["CAMERA", "MICROPHONE"])
+     */
+    fun getGrantedSensitivePermissions(packageName: String): List<String> {
+        try {
+            val pm = context.packageManager
+            val appInfo = pm.getApplicationInfo(packageName, 0)
+            val uid = appInfo.uid
+            
+            val grantedPermissions = mutableListOf<String>()
+            
+            // Verificar cada operación sensible con AppOpsManager
+            SENSITIVE_OPS.forEach { (op, permissionGroup) ->
+                try {
+                    val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        appOps.unsafeCheckOpNoThrow(op, uid, packageName)
+                    } else {
+                        appOps.checkOpNoThrow(op, uid, packageName)
+                    }
+                    
+                    if (mode == AppOpsManager.MODE_ALLOWED) {
+                        // Solo agregar una vez por grupo (evitar duplicados LOCATION/FINE+COARSE)
+                        if (!grantedPermissions.contains(permissionGroup)) {
+                            grantedPermissions.add(permissionGroup)
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Operación no soportada en este dispositivo, continuar
+                }
+            }
+            
+            return grantedPermissions
+            
+        } catch (e: Exception) {
+            android.util.Log.e("GuardianShieldMonitor", "Error verificando permisos de $packageName: ${e.message}")
+            return emptyList()
+        }
     }
     
     /**

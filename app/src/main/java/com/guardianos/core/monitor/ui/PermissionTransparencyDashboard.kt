@@ -17,6 +17,7 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
@@ -49,7 +50,8 @@ import java.util.*
 fun PermissionTransparencyDashboard(
     context: Context,
     monitor: RealTimePermissionMonitor,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onViewHistory: (() -> Unit)? = null
 ) {
     val scope = rememberCoroutineScope()
     val recentUsages = remember { mutableStateListOf<ActivePermissionUsage>() }
@@ -356,6 +358,43 @@ fun PermissionTransparencyDashboard(
         }
         
         Spacer(Modifier.height(20.dp))
+        
+        // Botón para ver historial completo guardado (solo si se proporciona el callback)
+        if (onViewHistory != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF5D8BF4).copy(alpha = 0.15f)
+                ),
+                border = BorderStroke(1.dp, Color(0xFF5D8BF4))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onViewHistory() }
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "📚 Historial Completo",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF5D8BF4)
+                        )
+                        Text(
+                            text = "Ver todas las detecciones guardadas por GuardianShield",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                    Text("➡️", fontSize = 24.sp)
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+        }
         
         // Leyenda ética con límites técnicos
         TechnicalLimitationsCard()

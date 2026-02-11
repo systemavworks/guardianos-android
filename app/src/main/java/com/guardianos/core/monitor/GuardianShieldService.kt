@@ -9,6 +9,8 @@ import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
 import com.guardianos.core.MainActivity
+import java.text.SimpleDateFormat
+import java.util.*
 
 /**
  * Servicio en primer plano que monitoriza accesos a permisos sensibles en tiempo real
@@ -23,7 +25,7 @@ class GuardianShieldService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "guardian_shield_monitor"
         private const val ALERT_CHANNEL_ID = "guardian_shield_alerts"
-        private const val CHECK_INTERVAL_MS = 30000L // 30 segundos
+        private const val CHECK_INTERVAL_MS = 5000L // 5 segundos (detección más rápida)
         
         // Apps del sistema que se ignoran para evitar spam de notificaciones
         private val SYSTEM_WHITELIST = setOf(
@@ -65,12 +67,46 @@ class GuardianShieldService : Service() {
             val intent = Intent(context, GuardianShieldService::class.java)
             context.stopService(intent)
         }
+        
+        /**
+         * Obtiene historial de accesos guardados.
+         * @return Lista de strings con formato "dd/MM/yyyy HH:mm:ss - App usó permiso"
+         */
+        fun getPermissionAccessHistory(context: Context): List<String> {
+            val prefs = context.getSharedPreferences("guardian_shield_log", Context.MODE_PRIVATE)
+            val log = prefs.getString("access_log", "") ?: ""
+            return log.lines()
+                .filter { it.isNotBlank() }
+                .reversed() // Más recientes primero
+                .map { line ->
+                    val parts = line.split("|")
+                    if (parts.size >= 4) {
+                        val timestamp = parts[0]
+                        val appName = parts[2]
+                        val permission = parts[3]
+                        val permissionName = when (permission) {
+                            "android.permission-group.CAMERA" -> "cámara"
+                            "android.permission-group.MICROPHONE" -> "micrófono"
+                            "android.permission-group.LOCATION" -> "ubicación"
+                            "android.permission-group.CONTACTS" -> "contactos"
+                            "android.permission-group.SMS" -> "SMS"
+                            "android.permission-group.CALL_LOG" -> "registro de llamadas"
+                            "android.permission-group.PHONE" -> "teléfono"
+                            else -> permission
+                        }
+                        "$timestamp - $appName usó $permissionName"
+                    } else {
+                        line // Fallback para formato antiguo
+                    }
+                }
+        }
     }
     
     private lateinit var handler: Handler
     private lateinit var monitor: GuardianShieldMonitor
     private var lastCheckedTime = 0L
     private val seenAccesses = mutableSetOf<String>() // packageName:permission
+    private val lastAppOpened = mutableMapOf<String, Long>() // packageName -> timestamp
     
     override fun onCreate() {
         super.onCreate()
@@ -181,41 +217,94 @@ class GuardianShieldService : Service() {
             val prefs = getSharedPreferences("guardian_shield", Context.MODE_PRIVATE)
             val userWhitelist = prefs.getStringSet("whitelist_apps", emptySet()) ?: emptySet()
             
-            // Obtener accesos recientes (últimos 2 minutos)
+            android.util.Log.d(TAG, "🔍 Guardian Shield: Verificando apps abiertas recientemente...")
+            
             val currentTime = System.currentTimeMillis()
-            val recentAccesses = monitor.getRecentPermissionAccess(2)
             
-            android.util.Log.d(TAG, "Guardian Shield check: ${recentAccesses.size} accesos detectados")
+            // Obtener apps que se abrieron RECIENTEMENTE (últimos 10 segundos)
+            val recentlyOpenedApps = monitor.getRecentlyOpenedApps(10) // segundos
             
-            recentAccesses.forEach { access ->
-                val accessKey = "${access.packageName}:${access.permissionGroup}:${access.lastAccessTime}"
+            android.util.Log.i(TAG, "📱 Apps abiertas detectadas: ${recentlyOpenedApps.size}")
+            
+            if (recentlyOpenedApps.isEmpty()) {
+                android.util.Log.d(TAG, "   → Ninguna app detectada en los últimos 10 segundos")
+                return
+            }
+            
+            var notificationsSent = 0
+            
+            recentlyOpenedApps.forEach { appInfo ->
+                val packageName = appInfo.packageName
+                val appName = appInfo.appName
                 
-                // Evitar duplicados y apps del sistema/whitelist
-                if (!seenAccesses.contains(accessKey) &&
-                    !SYSTEM_WHITELIST.contains(access.packageName) &&
-                    !userWhitelist.contains(access.packageName) &&
-                    access.lastAccessTime > lastCheckedTime
-                ) {
-                    seenAccesses.add(accessKey)
+                android.util.Log.d(TAG, "  📲 Analizando: $appName ($packageName)")
+                
+                // Verificar si ya notificamos esta apertura
+                val lastOpenTime = lastAppOpened[packageName] ?: 0L
+                if (currentTime - lastOpenTime < 60000) { // No repetir en 1 minuto
+                    android.util.Log.d(TAG, "     ⊗ Ya notificado hace menos de 1 minuto")
+                    return@forEach
+                }
+                
+                // Verificar whitelist del sistema
+                if (SYSTEM_WHITELIST.contains(packageName)) {
+                    android.util.Log.d(TAG, "     ⊗ En whitelist del sistema")
+                    return@forEach
+                }
+                
+                // Verificar whitelist del usuario
+                if (userWhitelist.contains(packageName)) {
+                    android.util.Log.d(TAG, "     ⊗ En whitelist del usuario")
+                    return@forEach
+                }
+                
+                // Obtener permisos SENSIBLES que tiene CONCEDIDOS
+                val grantedSensitivePermissions = monitor.getGrantedSensitivePermissions(packageName)
+                
+                if (grantedSensitivePermissions.isEmpty()) {
+                    android.util.Log.d(TAG, "     ✓ No tiene permisos sensibles concedidos")
+                    return@forEach
+                }
+                
+                android.util.Log.i(TAG, "     🚨 TIENE ${grantedSensitivePermissions.size} PERMISOS SENSIBLES:")
+                grantedSensitivePermissions.forEach { perm ->
+                    android.util.Log.i(TAG, "        - $perm")
+                }
+                
+                // Registrar que ya notificamos
+                lastAppOpened[packageName] = currentTime
+                
+                // Mostrar notificación POR CADA PERMISO
+                grantedSensitivePermissions.forEach { permissionGroup ->
+                    val access = PermissionAccessInfo(
+                        appName = appName,
+                        packageName = packageName,
+                        permission = permissionGroup,
+                        permissionGroup = permissionGroup,
+                        lastAccessTime = currentTime,
+                        accessCount = 1,
+                        isRealAccess = true
+                    )
                     
-                    // Solo alertar de permisos sensibles
-                    if (isSensitivePermission(access.permissionGroup)) {
-                        android.util.Log.i(TAG, "🛡️ Detectado: ${access.appName} (${access.packageName}) usando ${access.permissionGroup}")
-                        
-                        // Siempre mostrar notificación silenciosa (sin sonido/vibración)
-                        showPermissionAlert(access)
-                        
-                        // Guardar log del acceso
-                        logPermissionAccess(access)
-                    }
+                    showPermissionAlert(access)
+                    logPermissionAccess(access)
+                    notificationsSent++
                 }
             }
             
             lastCheckedTime = currentTime
             
-            // Limpiar cache de accesos viejos (más de 5 minutos)
-            if (seenAccesses.size > 100) {
-                seenAccesses.clear()
+            if (notificationsSent > 0) {
+                android.util.Log.i(TAG, "✅ ${notificationsSent} notificaciones enviadas")
+            } else {
+                android.util.Log.d(TAG, "   → Sin notificaciones para enviar")
+            }
+            
+            // Limpiar cache antiguo
+            if (lastAppOpened.size > 50) {
+                val twoMinutesAgo = currentTime - 120000
+                lastAppOpened.entries.removeIf { it.value < twoMinutesAgo }
+                android.util.Log.d(TAG, "Cache limpiado, quedan ${lastAppOpened.size} apps")
             }
             
         } catch (e: Exception) {
@@ -240,7 +329,7 @@ class GuardianShieldService : Service() {
         val permissionName = getPermissionDisplayName(access.permissionGroup)
         val icon = getPermissionIcon(access.permissionGroup)
         
-        android.util.Log.d(TAG, "Preparando notificación para ${access.appName} - $permissionName")
+        android.util.Log.d(TAG, "📢 Preparando notificación: ${access.appName} - $permissionName")
         
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
@@ -260,18 +349,16 @@ class GuardianShieldService : Service() {
         }
         
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
-            .setContentTitle("$icon ${access.appName} está usando $permissionName")
-            .setContentText("Acceso detectado en segundo plano")
+            .setContentTitle("$icon ${access.appName} puede usar $permissionName")
+            .setContentText("App abierta con acceso a $permissionName")
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
-            .setPriority(NotificationCompat.PRIORITY_LOW)  // Silenciosa
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)  // Visible pero no intrusiva
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-            .setSound(null)  // Sin sonido
-            .setVibrate(null)  // Sin vibración
-            .setOnlyAlertOnce(true)  // No repetir alert
+            .setOnlyAlertOnce(false)  // Permitir múltiples alertas
             .setStyle(NotificationCompat.BigTextStyle()
-                .bigText("${access.appName} está usando $permissionName. " +
-                        "Notificación informativa. Toca para ver detalles o revisar permisos en Ajustes."))
+                .bigText("${access.appName} se acaba de abrir y tiene permiso para usar $permissionName. " +
+                        "Monitorizado por GuardianShield. Toca para más detalles."))
             .build()
         
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -316,14 +403,26 @@ class GuardianShieldService : Service() {
     }
     
     private fun logPermissionAccess(access: PermissionAccessInfo) {
-        val prefs = getSharedPreferences("guardian_shield_log", Context.MODE_PRIVATE)
-        val log = prefs.getString("access_log", "") ?: ""
-        val newEntry = "${System.currentTimeMillis()}|${access.packageName}|${access.permissionGroup}\n"
-        
-        // Mantener solo últimas 100 entradas
-        val lines = log.lines().takeLast(99)
-        prefs.edit()
-            .putString("access_log", lines.joinToString("\n") + "\n" + newEntry)
-            .apply()
+        try {
+            val prefs = getSharedPreferences("guardian_shield_log", Context.MODE_PRIVATE)
+            val log = prefs.getString("access_log", "") ?: ""
+            
+            // Formato: timestamp|packageName|appName|permission
+            val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
+            val timestamp = dateFormat.format(Date(access.lastAccessTime))
+            val newEntry = "$timestamp|${access.packageName}|${access.appName}|${access.permissionGroup}"
+            
+            // Mantener últimas 200 entradas (historial más largo)
+            val lines = log.lines().filter { it.isNotBlank() }.takeLast(199)
+            val updatedLog = (lines + newEntry).joinToString("\n")
+            
+            prefs.edit()
+                .putString("access_log", updatedLog)
+                .apply()
+                
+            android.util.Log.d(TAG, "📝 Entrada guardada en historial: ${access.appName} - ${getPermissionDisplayName(access.permissionGroup)}")
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Error guardando log: ${e.message}")
+        }
     }
 }
