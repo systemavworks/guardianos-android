@@ -64,13 +64,55 @@ fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
         
         if (isLoading) {
             CircularProgressIndicator(modifier = Modifier.padding(32.dp))
+            Text(
+                text = "Analizando apps instaladas...",
+                fontSize = 12.sp,
+                color = Color.Gray,
+                modifier = Modifier.padding(8.dp)
+            )
         } else if (appsInfo.isEmpty()) {
-            Card {
-                Text(
-                    text = "✅ No se detectaron apps con acceso a fotos o documentos sensibles.",
-                    modifier = Modifier.padding(16.dp),
-                    color = Color(0xFF4CAF50)
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF4CAF50).copy(alpha = 0.15f)
                 )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "✅ Excelente: No se detectaron apps con acceso a fotos, vídeos o documentos sensibles.",
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF2E7D32)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Esto significa:\n" +
+                               "• Ninguna app tiene permisos OTORGADOS para leer tu multimedia\n" +
+                               "• Tu privacidad está protegida a nivel de archivos\n" +
+                               "• No hay apps sospechosas con acceso a fotos personales",
+                        fontSize = 12.sp,
+                        color = Color(0xFF1B5E20)
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "ℹ️ ¿Por qué no aparecen apps?",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Esta función detecta apps con permisos OTORGADOS (no solo solicitados). " +
+                               "Si no hay resultados, es positivo: significa que controlas bien los permisos de tu dispositivo.",
+                        fontSize = 11.sp,
+                        color = Color.Gray
+                    )
+                }
             }
         } else {
             Text(

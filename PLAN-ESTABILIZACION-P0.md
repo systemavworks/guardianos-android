@@ -296,7 +296,7 @@ FamilyVault.createAutoBackup(context)
 
 ---
 
-**Autor:** GitHub Copilot + Victor Shift Lara  
+**Autor:** Victor Shift Lara  
 **Última actualización:** 11 febrero 2026  
 **Siguiente revisión:** Post-testing 72h
 

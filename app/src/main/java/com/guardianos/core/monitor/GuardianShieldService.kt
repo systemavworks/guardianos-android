@@ -130,15 +130,17 @@ class GuardianShieldService : Service() {
                 setShowBadge(false)
             }
             
-            // Canal para alertas de seguridad
+            // Canal para información de accesos a permisos (silencioso)
             val alertChannel = NotificationChannel(
                 ALERT_CHANNEL_ID,
-                "Alertas de Seguridad",
-                NotificationManager.IMPORTANCE_HIGH
+                "Información de Permisos",
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Alertas cuando apps sospechosas acceden a permisos sensibles"
-                enableVibration(true)
-                enableLights(true)
+                description = "Notificaciones informativas sobre apps que usan permisos sensibles"
+                setSound(null, null)  // Sin sonido
+                enableVibration(false)  // Sin vibración
+                enableLights(false)  // Sin luz LED
+                setShowBadge(false)  // Sin badge en icono
             }
             
             notificationManager.createNotificationChannel(serviceChannel)
@@ -254,15 +256,18 @@ class GuardianShieldService : Service() {
         }
         
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
-            .setContentTitle("$icon ${access.appName} tiene acceso a $permissionName")
-            .setContentText("Permiso concedido y app activa recientemente")
-            .setSmallIcon(android.R.drawable.ic_dialog_alert)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentTitle("$icon ${access.appName} está usando $permissionName")
+            .setContentText("Acceso detectado recientemente")
+            .setSmallIcon(android.R.drawable.ic_menu_info_details)
+            .setPriority(NotificationCompat.PRIORITY_LOW)  // Silenciosa
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
+            .setSound(null)  // Forzar silencio
+            .setVibrate(null)  // Sin vibración
+            .setOnlyAlertOnce(true)  // No repetir sonido si se actualiza
             .setStyle(NotificationCompat.BigTextStyle()
-                .bigText("${access.appName} tiene permiso CONCEDIDO para acceder a $permissionName. " +
-                        "Si no reconoces esta app, revisa sus permisos en Ajustes."))
+                .bigText("${access.appName} está usando $permissionName. " +
+                        "Esta es una notificación informativa. Si no reconoces esta app, puedes revisar sus permisos en Ajustes."))
             .build()
         
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

@@ -389,17 +389,22 @@ fun FamilyVaultMainScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // Cabecera
+        // Cabecera con botón Volver
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                "Family Vault",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "Volver")
+                }
+                Text(
+                    "Family Vault",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
             
             IconButton(onClick = { showAddDialog = true }) {
                 Icon(Icons.Default.Add, contentDescription = "Añadir")
@@ -470,15 +475,6 @@ fun FamilyVaultMainScreen(
                     )
                 }
             }
-        }
-        
-        Spacer(Modifier.height(16.dp))
-        
-        Button(
-            onClick = onBack,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("← Volver")
         }
     }
     

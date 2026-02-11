@@ -1,22 +1,41 @@
 package com.guardianos.core.pro.ui
 
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.guardianos.core.pro.consulting.ConsultingManager
+import androidx.core.content.FileProvider
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @Composable
 fun ConsultingScreen(context: android.content.Context, pdfPath: String, onBack: () -> Unit) {
-    val hasPdf = pdfPath.isNotEmpty() && File(pdfPath).exists()
+    val scope = rememberCoroutineScope()
+    var recentPdf by remember { mutableStateOf<File?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    
+    // Buscar PDFs automáticamente al cargar la pantalla
+    LaunchedEffect(Unit) {
+        scope.launch {
+            recentPdf = withContext(Dispatchers.IO) {
+                findMostRecentPDF(context)
+            }
+            isLoading = false
+        }
+    }
     
     Column(
         modifier = Modifier
@@ -73,35 +92,45 @@ fun ConsultingScreen(context: android.content.Context, pdfPath: String, onBack: 
         Spacer(Modifier.height(16.dp))
         
         // Estado del PDF
-        if (hasPdf) {
+        if (isLoading) {
+            CircularProgressIndicator(modifier = Modifier.padding(16.dp))
+        } else if (recentPdf != null && recentPdf!!.exists()) {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = Color(0xFF4CAF50).copy(alpha = 0.15f)
                 )
             ) {
-                Text(
-                    text = "✅ Informe listo para enviar\nPDF: ${File(pdfPath).name}",
-                    fontSize = 12.sp,
-                    color = Color(0xFF4CAF50),
-                    modifier = Modifier.padding(12.dp)
-                )
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "✅ Informe encontrado",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF4CAF50)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "PDF: ${recentPdf!!.name}\nFecha: ${java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault()).format(recentPdf!!.lastModified())}",
+                        fontSize = 11.sp,
+                        color = Color(0xFF1B5E20)
+                    )
+                }
             }
         } else {
             Card(
                 colors = CardDefaults.cardColors(
-                    containerColor = Color(0xFFF59E0B).copy(alpha = 0.15f)
+                    containerColor = Color(0xFF2196F3).copy(alpha = 0.15f)
                 )
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        text = "⚠️ No hay informe disponible",
+                        text = "ℹ️ Sin informe reciente",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFFF59E0B)
+                        color = Color(0xFF1976D2)
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "Primero realiza un escaneo y exporta el PDF desde la pantalla de resultados.",
+                        text = "Puedes enviar consultas generales sin adjuntar informe, o escanear primero para adjuntar el PDF.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface
                     )
@@ -111,31 +140,58 @@ fun ConsultingScreen(context: android.content.Context, pdfPath: String, onBack: 
         
         Spacer(Modifier.height(16.dp))
         
-        // Botón enviar
+        // Botones de acción
         Button(
             onClick = {
-                if (hasPdf) {
-                    try {
-                        ConsultingManager.sendConsultingEmail(context, pdfPath)
-                    } catch (e: Exception) {
-                        Toast.makeText(
-                            context,
-                            "Error al abrir cliente de email: ${e.localizedMessage}",
-                            Toast.LENGTH_LONG
-                        ).show()
+                try {
+                    val emailIntent = Intent(Intent.ACTION_SENDTO).apply {
+                        data = Uri.parse("mailto:")
+                        putExtra(Intent.EXTRA_EMAIL, arrayOf("soporte@guardianos.es"))
+                        putExtra(Intent.EXTRA_SUBJECT, "Consultoría GuardianOS PRO")
+                        
+                        // Adjuntar PDF si existe
+                        if (recentPdf != null && recentPdf!!.exists()) {
+                            val uri = FileProvider.getUriForFile(
+                                context,
+                                "${context.packageName}.fileprovider",
+                                recentPdf!!
+                            )
+                            // Cambiar a ACTION_SEND para adjuntos
+                            action = Intent.ACTION_SEND
+                            type = "message/rfc822"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            putExtra(Intent.EXTRA_TEXT,
+                                "Hola equipo GuardianOS,\n\n" +
+                                "Adjunto mi informe de seguridad reciente y solicito consultoría sobre:\n\n" +
+                                "[Describe aquí tu duda o situación]\n\n" +
+                                "Gracias por el soporte."
+                            )
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        } else {
+                            putExtra(Intent.EXTRA_TEXT,
+                                "Hola equipo GuardianOS,\n\n" +
+                                "Solicito consultoría sobre:\n\n" +
+                                "[Describe aquí tu duda o situación]\n\n" +
+                                "Gracias por el soporte."
+                            )
+                        }
                     }
-                } else {
+                    
+                    context.startActivity(Intent.createChooser(emailIntent, "Enviar consulta"))
+                } catch (e: Exception) {
                     Toast.makeText(
                         context,
-                        "Primero genera un informe PDF desde la pantalla de resultados",
+                        "Error al abrir cliente de email: ${e.message}",
                         Toast.LENGTH_LONG
                     ).show()
                 }
             },
             modifier = Modifier.fillMaxWidth(),
-            enabled = hasPdf
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF8B5CF6)
+            )
         ) {
-            Text("📧 Enviar Consulta por Email")
+            Text(if (recentPdf != null) "📧 Enviar Consulta (PDF adjunto)" else "📧 Enviar Consulta")
         }
         
         Spacer(Modifier.height(8.dp))
@@ -162,8 +218,38 @@ fun ConsultingScreen(context: android.content.Context, pdfPath: String, onBack: 
         }
         
         Spacer(Modifier.height(16.dp))
-        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text("Volver")
+        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+            Text("← Volver")
         }
+    }
+}
+
+/**
+ * Busca el PDF más reciente en las carpetas de documentos
+ */
+private fun findMostRecentPDF(context: android.content.Context): File? {
+    return try {
+        // Buscar en Documents y Downloads
+        val documentsDir = context.getExternalFilesDir(null)
+        val downloadDir = context.getExternalFilesDir("Downloads")
+        
+        val allPdfs = mutableListOf<File>()
+        
+        // Buscar en Documents
+        documentsDir?.listFiles { file -> 
+            file.isFile && file.extension.lowercase() == "pdf" && 
+            file.name.contains("GuardianOS", ignoreCase = true)
+        }?.let { allPdfs.addAll(it) }
+        
+        // Buscar en Downloads
+        downloadDir?.listFiles { file -> 
+            file.isFile && file.extension.lowercase() == "pdf" && 
+            file.name.contains("GuardianOS", ignoreCase = true)
+        }?.let { allPdfs.addAll(it) }
+        
+        // Retornar el más reciente
+        allPdfs.maxByOrNull { it.lastModified() }
+    } catch (e: Exception) {
+        null
     }
 }

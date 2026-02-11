@@ -608,19 +608,19 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         actions = {
-                            IconButton(onClick = { currentScreen = "transparency" }) {
+                            // Icono Info: Información general de la app (versión, licencia, contacto)
+                            IconButton(onClick = { currentScreen = "about" }) {
                                 Icon(
                                     imageVector = androidx.compose.material.icons.Icons.Default.Info,
-                                    contentDescription = "Transparencia",
+                                    contentDescription = "Acerca de GuardianOS",
                                     tint = MaterialTheme.colorScheme.primary
                                 )
                             }
-                            IconButton(onClick = { currentScreen = "about" }) {
-                                Icon(
-                                    imageVector = Icons.Default.Info,
-                                    contentDescription = "Acerca de",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
+                            // Icono Shield: Guardian Shield (monitorización en tiempo real)
+                            if (isPro.value && BuildConfig.PRO_VERSION) {
+                                IconButton(onClick = { currentScreen = "transparency" }) {
+                                    Text("🛡️", fontSize = 20.sp)
+                                }
                             }
                         }
                     )
@@ -667,6 +667,17 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onActivatePro = { currentScreen = "pro_payment" },
+                            onGuardianShield = {
+                                if (isPro.value) {
+                                    currentScreen = "transparency"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
                             onISOAudit = {
                                 if (isPro.value) {
                                     currentScreen = "iso"
@@ -877,6 +888,11 @@ class MainActivity : ComponentActivity() {
                         "forensic" -> ForensicReportScreen(results = scanResults, onBack = { currentScreen = "home" })
                         "privacy" -> PrivacyProactiveScreen(context = context, onBack = { currentScreen = "home" })
                         "consulting" -> ConsultingScreen(context = context, pdfPath = pdfPath, onBack = { currentScreen = "home" })
+                        
+                        // Información de la app (versión, licencia, contacto)
+                        "about" -> AboutScreen(onBack = { currentScreen = "home" })
+                        
+                        // Guardian Shield (monitorización en tiempo real)
                         "transparency" -> PermissionTransparencyDashboard(
                             context = context,
                             monitor = permissionMonitor,
@@ -957,6 +973,7 @@ class MainActivity : ComponentActivity() {
         isPro: Boolean,
         onStartScan: () -> Unit,
         onActivatePro: () -> Unit,
+        onGuardianShield: () -> Unit,
         onISOAudit: () -> Unit,
         onNetworkMonitor: () -> Unit,
         onMediaAccess: () -> Unit,
@@ -981,21 +998,21 @@ class MainActivity : ComponentActivity() {
                 border = BorderStroke(1.dp, Color(0xFF10B981))
             ) {
                 Row(
-                    modifier = Modifier.padding(16.dp),
+                    modifier = Modifier.padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = Icons.Default.Info,
                         contentDescription = "Privacidad",
                         tint = Color(0xFF10B981),
-                        modifier = Modifier.size(24.dp)
+                        modifier = Modifier.size(20.dp)
                     )
-                    Spacer(Modifier.width(12.dp))
+                    Spacer(Modifier.width(8.dp))
                     Text(
-                        text = "🔒 Todo el análisis ocurre 100% LOCALMENTE en tu dispositivo. " +
-                               "Nunca enviamos tus datos a servidores.",
-                        fontSize = 13.sp,
-                        color = Color(0xFF0F766E) // Verde oscuro para texto
+                        text = "🔒 Todo el análisis ocurre 100% LOCALMENTE en tu dispositivo. Nunca enviamos tus datos a servidores.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF0F766E),
+                        lineHeight = 16.sp
                     )
                 }
             }
@@ -1090,7 +1107,7 @@ class MainActivity : ComponentActivity() {
                     icon = "🛡️",
                     title = "Guardian Shield",
                     description = "Alertas en tiempo real de accesos a cámara/micrófono",
-                    onClick = onActivatePro, // TODO: Enlazar a pantalla Shield
+                    onClick = onGuardianShield,
                     isPro = true,
                     color = Color(0xFF8B5CF6)
                 )
@@ -1211,38 +1228,36 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(24.dp))
 
-            // Origen andaluz destacado (valor diferencial)
+            // Footer con contacto
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
                     containerColor = Color(0xFF1E293B)
                 )
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Column {
-                        Text(
-                            text = "🇪🇸 Desarrollado en Andalucía",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF5D8BF4)
-                        )
-                        Text(
-                            text = "Protección digital ética desde Sevilla, España",
-                            fontSize = 12.sp,
-                            color = Color.Gray
-                        )
-                    }
-                    Spacer(Modifier.weight(1f))
                     Text(
-                        text = "guardianos.es",
+                        text = "https://guardianos.es",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF5D8BF4)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "info@guardianos.es",
                         fontSize = 13.sp,
-                        color = Color(0xFF5D8BF4),
-                        fontWeight = FontWeight.Bold
+                        color = Color.Gray
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "© 2026 GuardianOS",
+                        fontSize = 12.sp,
+                        color = Color.Gray
                     )
                 }
             }
@@ -2599,7 +2614,7 @@ class MainActivity : ComponentActivity() {
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            // Logo y título con origen andaluz
+            // Logo y título
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -2633,16 +2648,12 @@ class MainActivity : ComponentActivity() {
                         textAlign = TextAlign.Center
                     )
                     Spacer(Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("🇪🇸", fontSize = 18.sp)
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "Desarrollado en Andalucía, España",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF5D8BF4)
-                        )
-                    }
+                    Text(
+                        text = "https://guardianos.es • info@guardianos.es",
+                        fontSize = 13.sp,
+                        color = Color(0xFF5D8BF4),
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
 
@@ -2680,7 +2691,6 @@ class MainActivity : ComponentActivity() {
                         PrivacyPromiseItem("🔐", "Cifrado AES-256-GCM 100% local (sin backdoors)")
                         PrivacyPromiseItem("👁️", "NUNCA monitorizamos tu uso de la app")
                         PrivacyPromiseItem("📜", "Código abierto bajo licencia GPL v3.0 para auditoría pública")
-                        PrivacyPromiseItem("🇪🇸", "Desarrollado íntegramente en Andalucía,España")
                     }
                 }
             }
@@ -2753,13 +2763,6 @@ class MainActivity : ComponentActivity() {
                             context.startActivity(intent)
                         }
                     )
-                    
-                    ContactItem(
-                        icon = "🇪🇸",
-                        label = "Ubicación",
-                        value = "Andalucía, España",
-                        onClick = null
-                    )
                 }
             }
 
@@ -2790,7 +2793,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(16.dp))
                     Text(
                         text = "Copyright © 2026 $DEVELOPER_NAME\n" +
-                               "Desarrollado en Andalucía, España",
+                               "info@guardianos.es",
                         fontSize = 12.sp,
                         color = Color.Gray,
                         textAlign = TextAlign.Center,

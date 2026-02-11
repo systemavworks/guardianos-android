@@ -12,6 +12,7 @@ package com.guardianos.core.monitor.ui
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -141,6 +142,106 @@ fun PermissionTransparencyDashboard(
         }
         
         Spacer(Modifier.height(16.dp))
+        
+        // Callback para solicitar permisos
+        val onRequestPermissions = {
+            try {
+                context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            } catch (e: Exception) {
+                Toast.makeText(context, "No se puede abrir ajustes", Toast.LENGTH_SHORT).show()
+            }
+        }
+        
+        // Crear monitor temporal para verificar permisos
+        val hasUsageStats = remember {
+            com.guardianos.core.monitor.GuardianShieldMonitor(context).hasUsageStatsPermission()
+        }
+        
+        // Card informativa de permisos requeridos
+        if (!hasUsageStats) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF2196F3).copy(alpha = 0.15f)
+                ),
+                border = BorderStroke(1.dp, Color(0xFF2196F3))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("ℹ️", fontSize = 24.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = "Permisos necesarios para Guardian Shield",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1976D2)
+                        )
+                    }
+                    
+                    Spacer(Modifier.height(16.dp))
+                    
+                    PermissionInfoItem(
+                        icon = "📊",
+                        title = "1. Acceso a uso de aplicaciones",
+                        description = "Permite detectar qué apps están usando permisos en tiempo real",
+                        isGranted = hasUsageStats
+                    )
+                    
+                    Spacer(Modifier.height(12.dp))
+                    
+                    PermissionInfoItem(
+                        icon = "🔔",
+                        title = "2. Notificaciones (Android 13+)",
+                        description = "Para informarte silenciosamente cuando apps usan cámara, micrófono, etc.",
+                        isGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == 
+                                android.content.pm.PackageManager.PERMISSION_GRANTED
+                        } else true
+                    )
+                    
+                    Spacer(Modifier.height(12.dp))
+                    
+                    PermissionInfoItem(
+                        icon = "🔋",
+                        title = "3. Sin restricciones de batería (recomendado)",
+                        description = "Evita que Android detenga el servicio. Opcional pero mejora la fiabilidad.",
+                        isGranted = null // No verificamos, es opcional
+                    )
+                    
+                    Spacer(Modifier.height(16.dp))
+                    
+                    Text(
+                        text = "🔒 Privacidad garantizada:",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF4CAF50)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "• Todo el análisis ocurre 100% localmente en tu dispositivo\n" +
+                               "• NUNCA enviamos información de tus apps a servidores\n" +
+                               "• Los datos NO salen de tu teléfono",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        lineHeight = 18.sp
+                    )
+                    
+                    Spacer(Modifier.height(16.dp))
+                    
+                    Button(
+                        onClick = onRequestPermissions,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF2196F3)
+                        )
+                    ) {
+                        Text("Conceder permisos en Ajustes")
+                    }
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+        }
         
         // Control de monitorización
         GuardianShieldControlCard(
@@ -491,5 +592,43 @@ private fun getTimeAgo(timestamp: Long): String {
         seconds < 3600 -> "Hace ${seconds / 60}m"
         seconds < 86400 -> "Hace ${seconds / 3600}h"
         else -> SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
+    }
+}
+
+@Composable
+private fun PermissionInfoItem(
+    icon: String,
+    title: String,
+    description: String,
+    isGranted: Boolean?
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(icon, fontSize = 20.sp)
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = description,
+                fontSize = 12.sp,
+                color = Color.Gray,
+                lineHeight = 16.sp
+            )
+        }
+        if (isGranted != null) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = if (isGranted) "✅" else "⏳",
+                fontSize = 18.sp
+            )
+        }
     }
 }

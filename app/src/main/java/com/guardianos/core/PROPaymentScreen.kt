@@ -85,13 +85,6 @@ fun PROPaymentScreen(
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF10B981)
                 )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "Desarrollado éticamente en Andalucía, España",
-                    fontSize = 14.sp,
-                    color = Color.Gray,
-                    textAlign = TextAlign.Center
-                )
             }
         }
 
@@ -176,7 +169,6 @@ fun PROPaymentScreen(
                     text = "• 🔒 CERO trackers, CERO analytics, CERO telemetry\n" +
                            "• 📱 100% de los análisis se ejecutan LOCALMENTE en tu dispositivo\n" +
                            "• ☁️ NUNCA guardamos tus datos en la nube\n" +
-                           "• 🇪🇸 Desarrollado íntegramente en Andalucía (Sevilla), España\n" +
                            "• 💶 Pago único de 9,99€ (sin renovaciones automáticas)\n" +
                            "• 📜 Código abierto auditado bajo licencia GPL v3.0",
                     fontSize = 13.sp,
@@ -349,8 +341,7 @@ fun PROPaymentScreen(
                 Text(
                     text = "¿Problemas con el pago o activación?\n" +
                            "Escríbenos a: info@guardianos.es\n" +
-                           "Web: https://guardianos.es\n" +
-                           "Desarrollado en Andalucía, España 🇪🇸",
+                           "Web: https://guardianos.es",
                     fontSize = 13.sp,
                     color = Color.Gray,
                     lineHeight = 18.sp
@@ -396,7 +387,6 @@ fun PROPaymentScreen(
                     Text("• Todo el análisis ocurre 100% LOCALMENTE en tu teléfono")
                     Text("• El cifrado de documentos es AES-256-GCM sin backdoors")
                     Text("• Código abierto bajo GPL v3.0 para auditoría pública")
-                    Text("• Desarrollado íntegramente en Sevilla, Andalucía 🇪🇸")
                     Spacer(Modifier.height(12.dp))
                     Text(
                         "Somos una alternativa ética a las apps de ciberseguridad que venden tus datos. " +

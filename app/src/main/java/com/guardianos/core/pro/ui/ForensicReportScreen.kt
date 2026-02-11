@@ -1,20 +1,32 @@
 package com.guardianos.core.pro.ui
 
+import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import com.guardianos.core.domain.model.AppScanResult
+import com.guardianos.core.pdf.ItextPDFGenerator
 import com.guardianos.core.pro.forensic.ForensicReportHelper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 @Composable
 fun ForensicReportScreen(results: List<AppScanResult>, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isExporting by remember { mutableStateOf(false) }
     val forensicSummary = ForensicReportHelper.generateForensicSummary(results)
     val legalText = ForensicReportHelper.generateLegalSummary(results)
     
@@ -131,8 +143,97 @@ fun ForensicReportScreen(results: List<AppScanResult>, onBack: () -> Unit) {
         }
         
         Spacer(Modifier.height(16.dp))
-        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text("Volver")
+        
+        // Botones de acción
+        if (isExporting) {
+            CircularProgressIndicator(modifier = Modifier.padding(16.dp))
+            Text(
+                text = "Generando PDF forense...",
+                fontSize = 12.sp,
+                color = Color.Gray
+            )
+        } else {
+            Button(
+                onClick = {
+                    scope.launch {
+                        isExporting = true
+                        try {
+                            withContext(Dispatchers.IO) {
+                                ItextPDFGenerator.generateScanReport(context, results, forensicMode = true)
+                            }
+                            Toast.makeText(
+                                context,
+                                "PDF forense exportado correctamente",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(
+                                context,
+                                "Error al generar PDF: ${e.message}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } finally {
+                            isExporting = false
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF8B5CF6)
+                )
+            ) {
+                Text("📄 Exportar PDF Forense")
+            }
+            
+            Spacer(Modifier.height(8.dp))
+            
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        isExporting = true
+                        try {
+                            val pdfFile = withContext(Dispatchers.IO) {
+                                ItextPDFGenerator.generateScanReport(context, results, forensicMode = true)
+                            }
+                            
+                            // Compartir PDF
+                            val uri = FileProvider.getUriForFile(
+                                context,
+                                "${context.packageName}.fileprovider",
+                                pdfFile
+                            )
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "application/pdf"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                putExtra(Intent.EXTRA_SUBJECT, "Informe Forense GuardianOS")
+                                putExtra(Intent.EXTRA_TEXT, 
+                                    "Informe forense legal generado con GuardianOS.\n\n" +
+                                    "Hash SHA-256: ${forensicSummary.reportHash}\n" +
+                                    "Timestamp: ${forensicSummary.timestampFormatted}")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(shareIntent, "Compartir informe forense"))
+                        } catch (e: Exception) {
+                            Toast.makeText(
+                                context,
+                                "Error al compartir: ${e.message}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } finally {
+                            isExporting = false
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("📤 Compartir Informe")
+            }
+            
+            Spacer(Modifier.height(8.dp))
+            
+            OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+                Text("← Volver")
+            }
         }
     }
 }

@@ -40,24 +40,16 @@ K8tR7nX5pL9wV3xH5pW2qK8tR7nX5pL9wV3xH5pW2qK8tR7nX5pL9wV3xH5pW2qK
     
     /**
      * Verifica si la versión PRO está activada y es válida.
+     * IMPORTANTE: No re-valida el código en cada llamada para mantener persistencia.
      */
     fun isProActivated(context: Context): Boolean {
         return try {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val activated = prefs.getBoolean(KEY_ACTIVATED, false)
-            val code = prefs.getString(KEY_ACTIVATION_CODE, "") ?: ""
             
-            if (!activated || code.isEmpty()) return false
-            
-            // Verificar que el código sigue siendo válido
-            // Primero intentar firma RSA, luego código simple
-            val deviceId = prefs.getString(KEY_DEVICE_ID, "") ?: ""
-            if (validateActivationCode(code, deviceId)) {
-                return true
-            }
-            
-            // Fallback: validar código simple (GUAR-XXXX-XXXX-XXXX)
-            validateSimpleCode(code)
+            // Si está activado, confiar en el estado guardado (persistencia)
+            // No re-validar el código para evitar perder la activación
+            return activated
         } catch (e: Exception) {
             Log.e(TAG, "Error checking PRO activation", e)
             false
