@@ -41,10 +41,34 @@ K8tR7nX5pL9wV3xH5pW2qK8tR7nX5pL9wV3xH5pW2qK8tR7nX5pL9wV3xH5pW2qK
     /**
      * Verifica si la versión PRO está activada y es válida.
      * IMPORTANTE: No re-valida el código en cada llamada para mantener persistencia.
+     * 
+     * MIGRACIÓN: Convierte formato antiguo "status"="activated" al nuevo "activated"=true
      */
     fun isProActivated(context: Context): Boolean {
         return try {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            
+            // MIGRACIÓN: Verificar si existe formato antiguo y convertirlo
+            val oldStatus = prefs.getString("status", null)
+            if (oldStatus == "activated" && !prefs.contains(KEY_ACTIVATED)) {
+                // Migrar del formato antiguo al nuevo
+                val oldCode = prefs.getString("activation_code", "")
+                val oldTimestamp = prefs.getLong("activation_timestamp", System.currentTimeMillis())
+                
+                prefs.edit().apply {
+                    putBoolean(KEY_ACTIVATED, true)
+                    putString(KEY_ACTIVATION_CODE, oldCode)
+                    putLong(KEY_ACTIVATION_DATE, oldTimestamp)
+                    // Limpiar clave antigua
+                    remove("status")
+                    remove("activation_timestamp")
+                    apply()
+                }
+                
+                Log.d(TAG, "✅ Migrated old activation format to new format")
+                return true
+            }
+            
             val activated = prefs.getBoolean(KEY_ACTIVATED, false)
             
             // Si está activado, confiar en el estado guardado (persistencia)

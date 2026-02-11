@@ -24,6 +24,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardianos.core.BuildConfig
+import com.guardianos.core.pro.ProActivationManager
 import kotlinx.coroutines.launch
 
 /**
@@ -293,11 +294,11 @@ fun PROPaymentScreen(
                         }
                         
                         // Validación offline (sin llamadas a servidor)
-                        if (validateActivationCode(activationCode)) {
-                            saveActivationState(context, true, activationCode)
+                        if (ProActivationManager.validateActivationCode(activationCode)) {
+                            ProActivationManager.saveActivationState(context, true, activationCode)
                             
                             // Verificar persistencia
-                            if (isProActivated(context)) {
+                            if (ProActivationManager.isProActivated(context)) {
                                 Toast.makeText(
                                     context,
                                     "✅ ¡GuardianOS PRO activado! Bienvenido a la protección ética.",
@@ -439,57 +440,11 @@ fun PROPaymentScreen(
     }
 }
 
-/**
- * Valida código de activación offline.
- * 
- * Formato esperado: GUAR-XXXX-XXXX-XXXX
- * 
- * Esta función implementa validación básica offline.
- * Los códigos reales se generan con generate_pro_codes.py
- * 
- * @param code Código introducido por el usuario
- * @return true si el código es válido
- */
-fun validateActivationCode(code: String): Boolean {
-    // Validación básica de formato
-    if (!code.matches(Regex("^GUAR-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$"))) {
-        return false
-    }
-    
-    // En producción: validar contra base de datos local de códigos válidos
-    // o implementar algoritmo criptográfico de verificación offline
-    
-    // Por ahora, acepta cualquier código con formato correcto para testing
-    // TODO: Implementar validación con pro_codes.txt o algoritmo HMAC
-    return true
-}
-
-/**
- * Guarda estado de activación PRO en SharedPreferences.
- * 
- * @param context Contexto de Android
- * @param activated Estado de activación
- * @param code Código de activación usado
- */
-fun saveActivationState(context: Context, activated: Boolean, code: String) {
-    val prefs = context.getSharedPreferences("guardianos_pro", Context.MODE_PRIVATE)
-    prefs.edit().apply {
-        putString("status", if (activated) "activated" else "free")
-        putString("activation_code", code)
-        putLong("activation_timestamp", System.currentTimeMillis())
-        apply()
-    }
-}
-
-/**
- * Verifica si PRO está activado.
- * 
- * @param context Contexto de Android
- * @return true si PRO está activado
- */
-fun isProActivated(context: Context): Boolean {
-    if (!BuildConfig.PRO_VERSION) return false
-    
-    val prefs = context.getSharedPreferences("guardianos_pro", Context.MODE_PRIVATE)
-    return prefs.getString("status", "free") == "activated"
-}
+// NOTA: Las funciones validateActivationCode, saveActivationState y isProActivated
+// que estaban aquí han sido ELIMINADAS porque causaban problemas de persistencia.
+//
+// PROBLEMA: Usaban "status" = "activated" (string) pero ProActivationManager
+// usa "activated" = true (boolean), causando que MainActivity no detectara
+// la activación tras reiniciar la app.
+//
+// SOLUCIÓN: Ahora se usan las funciones de ProActivationManager directamente.
