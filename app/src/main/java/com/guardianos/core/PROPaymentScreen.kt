@@ -294,7 +294,9 @@ fun PROPaymentScreen(
                         }
                         
                         // Validación offline (sin llamadas a servidor)
-                        if (ProActivationManager.validateActivationCode(activationCode)) {
+                        // Intentar validación simple primero (GUAR-XXXX-XXXX-XXXX), luego RSA firmado
+                        if (ProActivationManager.validateSimpleCode(activationCode) || 
+                            ProActivationManager.validateActivationCode(activationCode)) {
                             ProActivationManager.saveActivationState(context, true, activationCode)
                             
                             // Verificar persistencia
