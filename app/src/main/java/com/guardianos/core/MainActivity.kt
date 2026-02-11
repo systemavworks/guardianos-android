@@ -76,12 +76,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.ShoppingCart
-import androidx.compose.material.icons.filled.Email
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -898,7 +893,7 @@ class MainActivity : ComponentActivity() {
                         "vault" -> {
                             if (isPro.value) {
                                 // Verificar si ya existe master password
-                                val hasPassword = VaultSecurityManager.isMasterPasswordSet(context)
+                                val hasPassword = VaultSecurityManager.hasMasterPassword(context)
                                 if (hasPassword) {
                                     // Mostrar pantalla de desbloqueo
                                     VaultUnlockScreen(
@@ -1321,12 +1316,6 @@ class MainActivity : ComponentActivity() {
                     imageVector = Icons.Default.ArrowForward,
                     contentDescription = "Ir",
                     tint = color
-                )
-            }
-        }
-    }
-                    fontSize = 24.sp,
-                    color = MaterialTheme.colorScheme.primary
                 )
             }
         }
@@ -2811,25 +2800,6 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(Modifier.height(32.dp))
-            
-            // Botón diagnóstico técnico (transparencia)
-            OutlinedButton(
-                onClick = { currentScreen = "diagnostics" },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = Color(0xFF5D8BF4)
-                ),
-                border = BorderStroke(1.dp, Color(0xFF5D8BF4))
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Build,
-                    contentDescription = "Diagnóstico"
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("🔧 Diagnóstico Técnico")
-            }
-            
-            Spacer(Modifier.height(12.dp))
             
             // Botón volver con icono
             Button(

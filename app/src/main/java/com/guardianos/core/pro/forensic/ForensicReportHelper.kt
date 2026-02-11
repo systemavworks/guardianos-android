@@ -82,11 +82,18 @@ object ForensicReportHelper {
         val timestampFormatted = formatter.format(Date(timestamp))
         
         // Generar hash del informe para cadena de custodia
-        val reportContent = results.joinToString { "${it.packageName}:${it.isMalware}:${it.riskScore}" }
+        val reportContent = results.joinToString { 
+            "${it.packageName}:${it.isMalware}:${it.isStalkerware}:${it.suspiciousPermissions.size}" 
+        }
         val reportHash = sha256(reportContent + timestamp)
         
-        val threatsDetected = results.count { it.isMalware || it.riskScore >= 50 }
-        val highRiskApps = results.count { it.riskScore >= 70 }
+        // Calcular métricas basadas en propiedades reales
+        val threatsDetected = results.count { 
+            it.isMalware || it.isStalkerware || it.suspiciousPermissions.size >= 3 
+        }
+        val highRiskApps = results.count { 
+            it.isMalware || it.isStalkerware || it.suspiciousPermissions.size >= 5 
+        }
         
         // Generar hallazgos forenses
         val findings = mutableListOf<ForensicFinding>()
@@ -97,7 +104,7 @@ object ForensicReportHelper {
                     severity = "CRÍTICO",
                     category = "Malware Detectado",
                     description = "App ${app.appName} identificada como malware conocido",
-                    evidence = "Hash certificado: ${app.sha256Cert?.take(16) ?: "N/A"}...",
+                    evidence = "Package: ${app.packageName}, Tipo: ${app.malwareType}",
                     recommendation = "Desinstalar de inmediato y cambiar contraseñas desde otro dispositivo"
                 ))
             }
@@ -107,17 +114,17 @@ object ForensicReportHelper {
                     severity = "CRÍTICO",
                     category = "Stalkerware (Vigilancia Oculta)",
                     description = "App ${app.appName} con capacidades de espionaje",
-                    evidence = "Package: ${app.packageName}",
+                    evidence = "Package: ${app.packageName}, Indicadores: ${app.stalkerwareIndicators.joinToString()}",
                     recommendation = "Requiere acción legal inmediata - posible violencia digital"
                 ))
             }
             
-            if (app.riskScore >= 70 && !app.isMalware) {
+            if (app.suspiciousPermissions.size >= 5 && !app.isMalware && !app.isStalkerware) {
                 findings.add(ForensicFinding(
                     severity = "ALTO",
                     category = "Permisos Invasivos",
                     description = "App ${app.appName} con acceso excesivo al dispositivo",
-                    evidence = "Score de riesgo: ${app.riskScore}/100",
+                    evidence = "Permisos sospechosos: ${app.suspiciousPermissions.size} (${app.suspiciousPermissions.take(3).joinToString()}...)",
                     recommendation = "Revisar permisos y considerar desinstalación"
                 ))
             }

@@ -179,9 +179,7 @@ fun ScanHistoryScreen(
                                                 containerColor = Color(0xFF5D8BF4)
                                             )
                                         ) {
-                                            Icon(Icons.Default.Compare, null, modifier = Modifier.size(18.dp))
-                                            Spacer(Modifier.width(4.dp))
-                                            Text("Comparar")
+                                            Text("📊 Comparar")
                                         }
                                         Spacer(Modifier.width(8.dp))
                                     }
