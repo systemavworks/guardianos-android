@@ -1181,7 +1181,11 @@ fun AddDocumentDialog(
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        selectedUri = uri
+        if (uri != null) {
+            selectedUri = uri
+        } else {
+            error = "No se seleccionó ningún archivo"
+        }
     }
     
     AlertDialog(

@@ -248,7 +248,28 @@ fun PermissionTransparencyDashboard(
             isActive = monitor.isMonitoring,
             onToggle = { shouldActivate ->
                 if (shouldActivate) {
+                    // Verificar y solicitar permiso de notificaciones en Android 13+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        if (context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) 
+                            != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                            Toast.makeText(
+                                context,
+                                "⚠️ Activa notificaciones en Ajustes para recibir alertas",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            try {
+                                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                }
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                // Fallback
+                            }
+                        }
+                    }
+                    
                     monitor.startMonitoring()
+                    com.guardianos.core.monitor.GuardianShieldService.start(context)
                     Toast.makeText(
                         context,
                         "✅ Guardian Shield activado",
@@ -256,6 +277,7 @@ fun PermissionTransparencyDashboard(
                     ).show()
                 } else {
                     monitor.stopMonitoring()
+                    com.guardianos.core.monitor.GuardianShieldService.stop(context)
                     activeSessions.clear()
                     Toast.makeText(
                         context,

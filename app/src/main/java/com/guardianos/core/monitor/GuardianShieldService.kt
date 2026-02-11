@@ -179,12 +179,13 @@ class GuardianShieldService : Service() {
     private fun checkPermissionAccesses() {
         try {
             val prefs = getSharedPreferences("guardian_shield", Context.MODE_PRIVATE)
-            val silentMode = prefs.getBoolean("silent_mode", false)
             val userWhitelist = prefs.getStringSet("whitelist_apps", emptySet()) ?: emptySet()
             
             // Obtener accesos recientes (últimos 2 minutos)
             val currentTime = System.currentTimeMillis()
             val recentAccesses = monitor.getRecentPermissionAccess(2)
+            
+            android.util.Log.d(TAG, "Guardian Shield check: ${recentAccesses.size} accesos detectados")
             
             recentAccesses.forEach { access ->
                 val accessKey = "${access.packageName}:${access.permissionGroup}:${access.lastAccessTime}"
@@ -199,9 +200,10 @@ class GuardianShieldService : Service() {
                     
                     // Solo alertar de permisos sensibles
                     if (isSensitivePermission(access.permissionGroup)) {
-                        if (!silentMode) {
-                            showPermissionAlert(access)
-                        }
+                        android.util.Log.i(TAG, "🛡️ Detectado: ${access.appName} (${access.packageName}) usando ${access.permissionGroup}")
+                        
+                        // Siempre mostrar notificación silenciosa (sin sonido/vibración)
+                        showPermissionAlert(access)
                         
                         // Guardar log del acceso
                         logPermissionAccess(access)
@@ -238,6 +240,8 @@ class GuardianShieldService : Service() {
         val permissionName = getPermissionDisplayName(access.permissionGroup)
         val icon = getPermissionIcon(access.permissionGroup)
         
+        android.util.Log.d(TAG, "Preparando notificación para ${access.appName} - $permissionName")
+        
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -250,28 +254,30 @@ class GuardianShieldService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) 
                 != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                android.util.Log.w(TAG, "No se puede notificar: permiso POST_NOTIFICATIONS denegado")
+                android.util.Log.w(TAG, "❌ No se puede notificar: permiso POST_NOTIFICATIONS denegado")
                 return
             }
         }
         
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle("$icon ${access.appName} está usando $permissionName")
-            .setContentText("Acceso detectado recientemente")
+            .setContentText("Acceso detectado en segundo plano")
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setPriority(NotificationCompat.PRIORITY_LOW)  // Silenciosa
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-            .setSound(null)  // Forzar silencio
+            .setSound(null)  // Sin sonido
             .setVibrate(null)  // Sin vibración
-            .setOnlyAlertOnce(true)  // No repetir sonido si se actualiza
+            .setOnlyAlertOnce(true)  // No repetir alert
             .setStyle(NotificationCompat.BigTextStyle()
                 .bigText("${access.appName} está usando $permissionName. " +
-                        "Esta es una notificación informativa. Si no reconoces esta app, puedes revisar sus permisos en Ajustes."))
+                        "Notificación informativa. Toca para ver detalles o revisar permisos en Ajustes."))
             .build()
         
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(access.hashCode(), notification)
+        
+        android.util.Log.i(TAG, "✅ Notificación enviada: ${access.appName} - $permissionName")
     }
     
     private fun getPermissionDisplayName(permissionGroup: String): String {

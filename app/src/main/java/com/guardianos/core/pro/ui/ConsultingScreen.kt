@@ -3,11 +3,15 @@ package com.guardianos.core.pro.ui
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -146,7 +150,7 @@ fun ConsultingScreen(context: android.content.Context, pdfPath: String, onBack: 
                 try {
                     val emailIntent = Intent(Intent.ACTION_SENDTO).apply {
                         data = Uri.parse("mailto:")
-                        putExtra(Intent.EXTRA_EMAIL, arrayOf("soporte@guardianos.es"))
+                        putExtra(Intent.EXTRA_EMAIL, arrayOf("info@guardianos.es"))
                         putExtra(Intent.EXTRA_SUBJECT, "Consultoría GuardianOS PRO")
                         
                         // Adjuntar PDF si existe
@@ -196,23 +200,80 @@ fun ConsultingScreen(context: android.content.Context, pdfPath: String, onBack: 
         
         Spacer(Modifier.height(8.dp))
         
-        // Información de contacto alternativa
+        // Información de contacto alternativa (clickables)
         Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    try {
+                        val emailIntent = Intent(Intent.ACTION_SENDTO).apply {
+                            data = Uri.parse("mailto:info@guardianos.es")
+                            putExtra(Intent.EXTRA_SUBJECT, "Consultoría GuardianOS PRO")
+                        }
+                        context.startActivity(emailIntent)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Error al abrir email: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                },
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surface
             )
         ) {
-            Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = "📧 Email directo: soporte@guardianos.es",
+                    text = "📧 Email directo: info@guardianos.es",
                     fontSize = 12.sp,
-                    color = Color.Gray
+                    color = Color(0xFF5D8BF4)
                 )
-                Spacer(Modifier.height(4.dp))
+                Icon(
+                    imageVector = Icons.Default.ArrowForward,
+                    contentDescription = "Enviar email",
+                    tint = Color(0xFF5D8BF4),
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+        
+        Spacer(Modifier.height(8.dp))
+        
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    try {
+                        val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://guardianos.es"))
+                        context.startActivity(webIntent)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Error al abrir navegador: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                },
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = "🌐 Web: https://guardianos.es/consultas",
+                    text = "🌐 Web: https://guardianos.es",
                     fontSize = 12.sp,
-                    color = Color.Gray
+                    color = Color(0xFF5D8BF4)
+                )
+                Icon(
+                    imageVector = Icons.Default.ArrowForward,
+                    contentDescription = "Abrir web",
+                    tint = Color(0xFF5D8BF4),
+                    modifier = Modifier.size(16.dp)
                 )
             }
         }

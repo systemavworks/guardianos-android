@@ -10,7 +10,7 @@ object ConsultingManager {
     fun sendConsultingEmail(context: Context, pdfPath: String) {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "application/pdf"
-            putExtra(Intent.EXTRA_EMAIL, arrayOf("soporte@guardianos.es"))
+            putExtra(Intent.EXTRA_EMAIL, arrayOf("info@guardianos.es"))
             putExtra(Intent.EXTRA_SUBJECT, "Consulta personalizada GuardianOS PRO")
             putExtra(Intent.EXTRA_TEXT, "Adjunto el informe para revisión personalizada.")
             putExtra(Intent.EXTRA_STREAM, android.net.Uri.parse(pdfPath))

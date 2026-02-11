@@ -542,25 +542,25 @@ class MainActivity : ComponentActivity() {
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 18.sp
                                 )
-                                Spacer(Modifier.width(8.dp))
+                                Spacer(Modifier.width(6.dp))
                                 // Indicador de privacidad 100% local
                                 Surface(
                                     color = Color(0xFF4CAF50),  // Verde esmeralda (procesamiento local verificado)
                                     shape = MaterialTheme.shapes.small
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Box(
                                             modifier = Modifier
-                                                .size(6.dp)
+                                                .size(4.dp)
                                                 .background(Color.White, androidx.compose.foundation.shape.CircleShape)
                                         )
-                                        Spacer(Modifier.width(4.dp))
+                                        Spacer(Modifier.width(3.dp))
                                         Text(
                                             text = "100% LOCAL",
-                                            fontSize = 9.sp,
+                                            fontSize = 7.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = Color.White
                                         )
@@ -1293,40 +1293,41 @@ class MainActivity : ComponentActivity() {
             ) {
                 Text(
                     text = icon,
-                    fontSize = 32.sp,
+                    fontSize = 24.sp,
                     color = color,
-                    modifier = Modifier.padding(end = 16.dp)
+                    modifier = Modifier.padding(end = 12.dp)
                 )
                 Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = title,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        if (isPro) {
-                            Spacer(Modifier.width(8.dp))
-                            Surface(
-                                color = color,
-                                shape = MaterialTheme.shapes.small
-                            ) {
-                                Text(
-                                    text = "PRO",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
-                            }
-                        }
-                    }
+                    Text(
+                        text = title,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
                     Text(
                         text = description,
                         fontSize = 12.sp,
                         color = Color.Gray,
-                        modifier = Modifier.padding(top = 4.dp)
+                        modifier = Modifier.padding(top = 2.dp),
+                        maxLines = 2
                     )
                 }
+                if (isPro) {
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        color = color,
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            text = "PRO",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
                 Icon(
                     imageVector = Icons.Default.ArrowForward,
                     contentDescription = "Ir",
