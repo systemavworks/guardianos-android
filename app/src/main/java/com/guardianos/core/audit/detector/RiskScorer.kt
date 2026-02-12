@@ -223,75 +223,109 @@ object RiskScorer {
         Log.d(TAG, "Iniciando escaneo completo de stalkerware...")
         
         try {
-            // 1. Ejecutar los 3 detectores (los más pesados primero para fail-fast)
-            Log.d(TAG, "[1/3] Escaneando servicios de accesibilidad...")
-            val accessibilityReports = AccessibilityMonitor.scanAccessibilityServices(context)
-                .associateBy { it.packageName }
-            Log.d(TAG, "  ✓ ${accessibilityReports.size} servicios analizados")
+            val pm = context.packageManager
             
-            // Liberar memoria antes del siguiente detector
-            System.gc()
-            Thread.sleep(100)
+            // Obtener todas las apps instaladas
+            val installedApps = pm.getInstalledApplications(0)
+            Log.d(TAG, "Apps instaladas: ${installedApps.size}")
             
-            Log.d(TAG, "[2/3] Detectando apps ocultas...")
-            val hiddenAppReports = HiddenAppsDetector.scanHiddenApps(context)
-                .associateBy { it.packageName }
-            Log.d(TAG, "  ✓ ${hiddenAppReports.size} apps con técnicas de ocultación")
+            // Procesar en chunks pequeños para evitar OOM
+            val chunkSize = 15  // Más pequeño que antes
+            val chunks = installedApps.chunked(chunkSize)
             
-            // Liberar memoria antes del siguiente detector
-            System.gc()
-            Thread.sleep(100)
+            Log.d(TAG, "Procesando en ${chunks.size} lotes de $chunkSize apps...")
             
-            Log.d(TAG, "[3/3] Analizando servicios en segundo plano...")
-            val serviceReports = BackgroundServicesAnalyzer.analyzeBackgroundServices(context)
-                .associateBy { it.packageName }
-            Log.d(TAG, "  ✓ ${serviceReports.size} servicios persistentes")
-            
-            // Liberar memoria antes de procesar resultados
-            System.gc()
-            Thread.sleep(100)
-            
-            // 2. Combinar todas las apps detectadas
-            val allPackages = (accessibilityReports.keys + hiddenAppReports.keys + serviceReports.keys).distinct()
-            Log.d(TAG, "Total de apps sospechosas a analizar: ${allPackages.size}")
-            
-            // 3. Calcular score para cada app (en chunks para prevenir OOM)
-            val chunkSize = 20
-            val chunks = allPackages.chunked(chunkSize)
-            
+            // Ejecutar detectores por cada chunk (no todos de golpe)
             for ((chunkIndex, chunk) in chunks.withIndex()) {
-                Log.d(TAG, "[Scoring ${chunkIndex + 1}/${chunks.size}] Procesando ${chunk.size} apps...")
+                Log.d(TAG, "[Lote ${chunkIndex + 1}/${chunks.size}] Analizando ${chunk.size} apps...")
                 
-                for (packageName in chunk) {
-                try {
-                    val report = calculateStalkerwareRisk(
-                        context,
-                        packageName,
-                        accessibilityReports[packageName],
-                        hiddenAppReports[packageName],
-                        serviceReports[packageName]
-                    )
-                    
-                    // Solo incluir apps con riesgo >= MEDIUM
-                    if (report.riskLevel != StalkerwareRiskLevel.SAFE) {
-                        reports.add(report)
-                    }
-                    
+                // Obtener los packageNames del chunk
+                val chunkPackages = chunk.map { it.packageName }
+                
+                // Detectores ligeros por chunk
+                val accessibilityReports = try {
+                    AccessibilityMonitor.scanAccessibilityServices(context)
+                        .filter { it.packageName in chunkPackages }
+                        .associateBy { it.packageName }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Error analizando $packageName", e)
+                    Log.w(TAG, "Error en AccessibilityMonitor: ${e.message}")
+                    emptyMap()
                 }
-            }
                 
-                // Liberar memoria entre chunks
+                // Detección simplificada de apps ocultas (sin crear objetos complejos)
+                val hiddenAppReports = try {
+                    chunk.mapNotNull { appInfo ->
+                        val packageName = appInfo.packageName
+                        val hasLauncher = pm.getLaunchIntentForPackage(packageName) != null
+                        val appName = pm.getApplicationLabel(appInfo).toString()
+                        val isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                        
+                        // Solo detectar apps sin launcher que NO sean del sistema
+                        if (!hasLauncher && !isSystemApp) {
+                            try {
+                                val packageInfo = pm.getPackageInfo(packageName, 0)
+                                val installTime = packageInfo.firstInstallTime
+                                val installHour = java.util.Calendar.getInstance().apply {
+                                    timeInMillis = installTime
+                                }.get(java.util.Calendar.HOUR_OF_DAY)
+                                
+                                HiddenAppsDetector.HiddenAppReport(
+                                    packageName = packageName,
+                                    appName = appName,
+                                    hasLauncherIcon = false,
+                                    hasInvisibleName = appName.isEmpty() || appName.matches(Regex("[\\p{C}\\s]+")),
+                                    isDuplicateApp = false,
+                                    duplicateOf = null,
+                                    installTime = installTime,
+                                    installHour = installHour,
+                                    isSystemApp = false,
+                                    riskScore = 30,
+                                    riskLevel = HiddenAppsDetector.RiskLevel.MEDIUM,
+                                    hidingTechniques = listOf("Sin ícono launcher")
+                                )
+                            } catch (e: Exception) {
+                                null
+                            }
+                        } else null
+                    }.filterNotNull().associateBy { it.packageName }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error en HiddenAppsDetector: ${e.message}")
+                    emptyMap()
+                }
+                
+                // Analizar cada app del chunk
+                for (appInfo in chunk) {
+                    try {
+                        val packageName = appInfo.packageName
+                        
+                        val report = calculateStalkerwareRisk(
+                            context,
+                            packageName,
+                            accessibilityReports[packageName],
+                            hiddenAppReports[packageName],
+                            null  // Saltamos BackgroundServices para simplificar
+                        )
+                        
+                        // Solo incluir apps con riesgo >= MEDIUM
+                        if (report.riskLevel != StalkerwareRiskLevel.SAFE) {
+                            reports.add(report)
+                        }
+                        
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error analizando ${appInfo.packageName}: ${e.message}")
+                    }
+                }
+                
+                // Liberar memoria agresivamente entre chunks
                 if (chunkIndex < chunks.size - 1) {
                     System.gc()
-                    Thread.sleep(50)
+                    Thread.sleep(100)
                 }
             }
             
             Log.d(TAG, "═══════════════════════════════════════════")
             Log.d(TAG, "Escaneo completo finalizado")
-            Log.d(TAG, "Apps analizadas: ${allPackages.size}")
+            Log.d(TAG, "Apps analizadas: ${installedApps.size}")
             Log.d(TAG, "Apps con riesgo detectado: ${reports.size}")
             Log.d(TAG, "  - STALKERWARE CONFIRMADO: ${reports.count { it.riskLevel == StalkerwareRiskLevel.STALKERWARE_CONFIRMED }}")
             Log.d(TAG, "  - SOSPECHA ALTA: ${reports.count { it.riskLevel == StalkerwareRiskLevel.HIGH_SUSPICION }}")
@@ -300,10 +334,11 @@ object RiskScorer {
             return reports.sortedByDescending { it.totalScore }
             
         } catch (e: OutOfMemoryError) {
-            Log.e(TAG, "OutOfMemoryError en escaneo stalkerware - dispositivo con demasiadas apps", e)
-            throw e  // Re-lanzar para que StalkerwareScreen lo capture
+            Log.e(TAG, "OutOfMemoryError en escaneo stalkerware", e)
+            System.gc()
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Error fatal en escaneo stalkerware", e)
+            Log.e(TAG, "Error en escaneo stalkerware", e)
             throw e
         }
     }

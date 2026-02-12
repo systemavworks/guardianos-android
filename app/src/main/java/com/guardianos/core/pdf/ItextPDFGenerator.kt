@@ -532,26 +532,73 @@ object ItextPDFGenerator {
         document.add(findingsTable)
         
         // Controles
-        document.add(Paragraph("Controles Evaluados")
+        document.add(Paragraph("Controles ISO 27001:2022 Evaluados")
             .setFontSize(16f)
             .setBold()
             .setMarginTop(20f)
             .setMarginBottom(10f))
         
-        isoReport.controls.forEach { control ->
-            val controlPara = Paragraph()
-                .add(Text("${control.id} - ${control.name}\n").setBold().setFontSize(11f))
-                .add(Text("Estado: ${if (control.compliant) "✅ CUMPLE" else "❌ NO CUMPLE"}\n")
-                    .setFontSize(10f)
-                    .setFontColor(if (control.compliant) SUCCESS_COLOR else ERROR_COLOR))
+        // Agregar descripción
+        document.add(Paragraph("Se evaluaron ${isoReport.controls.size} controles de seguridad según el estándar ISO 27001:2022.")
+            .setFontSize(10f)
+            .setMarginBottom(15f))
+        
+        // Agrupar controles por cumplimiento
+        val compliantControls = isoReport.controls.filter { it.compliant }
+        val nonCompliantControls = isoReport.controls.filter { !it.compliant }
+        
+        // Mostrar controles NO cumplidos primero (más importante)
+        if (nonCompliantControls.isNotEmpty()) {
+            document.add(Paragraph("⚠️ Controles NO Cumplidos (${nonCompliantControls.size})")
+                .setFontSize(14f)
+                .setBold()
+                .setFontColor(ERROR_COLOR)
+                .setMarginTop(10f)
+                .setMarginBottom(10f))
             
-            if (control.findings.isNotEmpty()) {
-                control.findings.forEach { finding ->
-                    controlPara.add(Text("  • $finding\n").setFontSize(9f).setFontColor(ColorConstants.GRAY))
+            nonCompliantControls.forEach { control ->
+                val card = createISOControlCard(control, false)
+                document.add(card)
+            }
+        }
+        
+        // Mostrar controles cumplidos
+        if (compliantControls.isNotEmpty()) {
+            document.add(Paragraph("✅ Controles Cumplidos (${compliantControls.size})")
+                .setFontSize(14f)
+                .setBold()
+                .setFontColor(SUCCESS_COLOR)
+                .setMarginTop(20f)
+                .setMarginBottom(10f))
+            
+            compliantControls.forEach { control ->
+                val card = createISOControlCard(control, true)
+                document.add(card)
+            }
+        }
+        
+        // Resumen de recomendaciones
+        if (nonCompliantControls.isNotEmpty()) {
+            document.add(Paragraph("Recomendaciones Prioritarias")
+                .setFontSize(14f)
+                .setBold()
+                .setMarginTop(30f)
+                .setMarginBottom(10f))
+            
+            val recommendations = Paragraph()
+                .setFontSize(9f)
+            
+            nonCompliantControls.take(5).forEachIndexed { index, control ->
+                recommendations.add(Text("${index + 1}. ").setBold())
+                recommendations.add("${control.name}: ")
+                if (control.findings.isNotEmpty()) {
+                    recommendations.add("${control.findings.first()}\n")
+                } else {
+                    recommendations.add("Revisar cumplimiento de este control.\n")
                 }
             }
             
-            document.add(controlPara.setMarginBottom(10f))
+            document.add(recommendations.setMarginBottom(20f))
         }
         
         // Modo forense
@@ -652,6 +699,58 @@ object ItextPDFGenerator {
             .add(Paragraph(text).setBold().setFontSize(10f).setFontColor(ColorConstants.WHITE))
             .setBackgroundColor(PRIMARY_COLOR)
             .setPadding(5f)
+    }
+    
+    /**
+     * Crea tarjeta visual para control ISO 27001.
+     */
+    private fun createISOControlCard(control: ISOControl, isCompliant: Boolean): Paragraph {
+        val card = Paragraph()
+            .setBackgroundColor(if (isCompliant) DeviceRgb(240, 253, 244) else DeviceRgb(254, 242, 242), 1f)
+            .setBorder(Border.NO_BORDER)
+            .setPadding(10f)
+            .setMarginBottom(8f)
+        
+        // Encabezado del control
+        card.add(Text("${control.id} - ${control.name}\n")
+            .setBold()
+            .setFontSize(11f)
+            .setFontColor(if (isCompliant) SUCCESS_COLOR else ERROR_COLOR))
+        
+        // Estado
+        val statusIcon = if (isCompliant) "✅ CUMPLE" else "❌ NO CUMPLE"
+        card.add(Text("Estado: $statusIcon\n")
+            .setFontSize(10f)
+            .setBold()
+            .setFontColor(if (isCompliant) SUCCESS_COLOR else ERROR_COLOR))
+        
+        // Descripción
+        card.add(Text("${control.description}\n")
+            .setFontSize(9f)
+            .setFontColor(DeviceRgb(75, 85, 99)))
+        
+        // Severidad
+        val severityText = when (control.severity) {
+            ControlSeverity.CRITICAL -> "🔴 CRÍTICO"
+            ControlSeverity.HIGH -> "🟠 ALTO"
+            ControlSeverity.MEDIUM -> "🟡 MEDIO"
+            ControlSeverity.LOW -> "🟢 BAJO"
+        }
+        card.add(Text("Severidad: $severityText\n")
+            .setFontSize(9f)
+            .setFontColor(DeviceRgb(107, 114, 128)))
+        
+        // Hallazgos
+        if (control.findings.isNotEmpty()) {
+            card.add(Text("\nHallazgos:\n").setBold().setFontSize(9f))
+            control.findings.forEach { finding ->
+                card.add(Text("  • $finding\n")
+                    .setFontSize(8f)
+                    .setFontColor(DeviceRgb(107, 114, 128)))
+            }
+        }
+        
+        return card
     }
     
     /**
