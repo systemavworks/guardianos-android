@@ -1,6 +1,8 @@
 package com.guardianos.core.pdf
 
 import android.content.Context
+import android.os.Build
+import android.provider.Settings
 import com.guardianos.core.domain.model.*
 import com.itextpdf.kernel.colors.ColorConstants
 import com.itextpdf.kernel.colors.DeviceRgb
@@ -61,6 +63,24 @@ object ItextPDFGenerator {
         document.add(Paragraph("Fecha: ${dateFormat.format(Date())}")
             .setFontSize(12f)
             .setMarginBottom(5f))
+        
+        // Información del dispositivo
+        document.add(Paragraph("Dispositivo: ${Build.MANUFACTURER} ${Build.MODEL}")
+            .setFontSize(10f)
+            .setMarginBottom(3f))
+        
+        document.add(Paragraph("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            .setFontSize(10f)
+            .setMarginBottom(if (forensicMode) 3f else 15f))
+        
+        // ID único del dispositivo (solo en modo forense)
+        if (forensicMode) {
+            val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+            document.add(Paragraph("Device ID: $androidId")
+                .setFontSize(9f)
+                .setFontColor(DeviceRgb(100, 100, 100))
+                .setMarginBottom(15f))
+        }
         
         // Resumen estadístico
         val threats = results.count { it.isMalware || it.isStalkerware }
@@ -221,7 +241,25 @@ object ItextPDFGenerator {
         val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
         document.add(Paragraph("Fecha: ${dateFormat.format(Date())}")
             .setFontSize(12f)
-            .setMarginBottom(20f))
+            .setMarginBottom(5f))
+        
+        // Información del dispositivo
+        document.add(Paragraph("Dispositivo: ${Build.MANUFACTURER} ${Build.MODEL}")
+            .setFontSize(10f)
+            .setMarginBottom(3f))
+        
+        document.add(Paragraph("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            .setFontSize(10f)
+            .setMarginBottom(if (forensicMode) 3f else 20f))
+        
+        // ID único del dispositivo (solo en modo forense)
+        if (forensicMode) {
+            val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+            document.add(Paragraph("Device ID: $androidId")
+                .setFontSize(9f)
+                .setFontColor(DeviceRgb(100, 100, 100))
+                .setMarginBottom(20f))
+        }
         
         // Banner de información
         val infoPara = Paragraph()

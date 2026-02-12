@@ -82,8 +82,17 @@ object BackgroundServicesAnalyzer {
             
             Log.d(TAG, "Servicios activos: ${runningServices.size}")
             
-            // Analizar cada servicio
-            for (serviceInfo in runningServices) {
+            // Procesar servicios en chunks para prevenir OutOfMemoryError
+            val chunkSize = 25
+            val chunks = runningServices.chunked(chunkSize)
+            
+            Log.d(TAG, "Procesando ${runningServices.size} servicios en ${chunks.size} lotes...")
+            
+            for ((chunkIndex, chunk) in chunks.withIndex()) {
+                Log.d(TAG, "[Lote ${chunkIndex + 1}/${chunks.size}] Analizando ${chunk.size} servicios...")
+                
+                // Analizar cada servicio del chunk
+                for (serviceInfo in chunk) {
                 try {
                     val packageName = serviceInfo.service.packageName
                     val serviceName = serviceInfo.service.className
@@ -181,6 +190,14 @@ object BackgroundServicesAnalyzer {
                     Log.w(TAG, "Error analizando servicio: ${e.message}")
                 }
             }
+            
+            // Liberar memoria entre chunks si no es el último
+            if (chunkIndex < chunks.size - 1) {
+                Log.d(TAG, "  Liberando memoria antes del siguiente lote...")
+                System.gc()
+                Thread.sleep(50)
+            }
+        }
             
             Log.d(TAG, "═══════════════════════════════════════════")
             Log.d(TAG, "Servicios sospechosos detectados: ${reports.size}")
