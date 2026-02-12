@@ -15,6 +15,8 @@ import com.guardianos.core.pro.media.MediaAccessScanner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.*
 
 @Composable
 fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
@@ -130,6 +132,7 @@ fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
                         .padding(vertical = 6.dp),
                     colors = CardDefaults.cardColors(
                         containerColor = when (app.riskLevel) {
+                            "CRÍTICO" -> Color(0xFF8B0000).copy(alpha = 0.20f)
                             "ALTO" -> Color(0xFFB3261E).copy(alpha = 0.15f)
                             "MEDIO" -> Color(0xFFF59E0B).copy(alpha = 0.15f)
                             else -> MaterialTheme.colorScheme.surface
@@ -146,6 +149,7 @@ fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
                             )
                             Surface(
                                 color = when (app.riskLevel) {
+                                    "CRÍTICO" -> Color(0xFF8B0000)
                                     "ALTO" -> Color(0xFFB3261E)
                                     "MEDIO" -> Color(0xFFF59E0B)
                                     else -> Color(0xFF4CAF50)
@@ -167,6 +171,38 @@ fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
                             fontSize = 11.sp,
                             color = Color.Gray
                         )
+                        
+                        // Mostrar última vez usada y frecuencia
+                        if (app.lastUsed > 0) {
+                            Spacer(Modifier.height(6.dp))
+                            val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault())
+                            Text(
+                                text = "⏰ Última vez: ${dateFormat.format(Date(app.lastUsed))} • ${app.usageFrequency}",
+                                fontSize = 11.sp,
+                                color = Color(0xFF5D8BF4),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        
+                        // Patrones sospechosos detectados
+                        if (app.suspiciousPatterns.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Patrones detectados:",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFB3261E)
+                            )
+                            app.suspiciousPatterns.forEach { pattern ->
+                                Text(
+                                    text = pattern,
+                                    fontSize = 11.sp,
+                                    color = Color(0xFFB3261E),
+                                    modifier = Modifier.padding(start = 8.dp, top = 2.dp)
+                                )
+                            }
+                        }
+                        
                         Spacer(Modifier.height(8.dp))
                         Text(
                             text = "Permisos otorgados:",

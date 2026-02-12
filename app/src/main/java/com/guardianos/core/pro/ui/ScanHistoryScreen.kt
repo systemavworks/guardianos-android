@@ -24,6 +24,10 @@ import com.guardianos.core.domain.model.Risk
 import com.guardianos.core.pro.ScanComparator
 import com.guardianos.core.pro.ScanEntry
 import com.guardianos.core.pro.ScanHistory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -235,6 +239,8 @@ private fun ScanHistoryCard(
     isSelected: Boolean,
     onSelect: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
     val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault())
     val dateStr = dateFormat.format(Date(scan.timestamp))
     
@@ -306,6 +312,78 @@ private fun ScanHistoryCard(
                 if (criticalApps == 0 && highRiskApps == 0) {
                     RiskBadge("✅ Seguro", Color(0xFF10B981))
                 }
+            }
+            
+            Spacer(Modifier.height(12.dp))
+            
+            // Botón para ver PDF
+            Button(
+                onClick = {
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            // Convertir AppAudit a AppScanResult para el PDF
+                            val scanResults = scan.apps.map { audit ->
+                                // Detectar malware/stalkerware de los findings
+                                val isMalware = audit.findings.any { it.title.contains("malware", ignoreCase = true) || it.description.contains("malware", ignoreCase = true) }
+                                val isStalkerware = audit.findings.any { it.title.contains("stalkerware", ignoreCase = true) || it.description.contains("stalkerware", ignoreCase = true) }
+                                val suspiciousPerms = audit.permissions.filter { it.dangerous }.map { it.name }
+                                
+                                com.guardianos.core.domain.model.AppScanResult(
+                                    appName = audit.appName,
+                                    packageName = audit.packageName,
+                                    isMalware = isMalware,
+                                    malwareType = if (isMalware) "Detectado" else "",
+                                    isStalkerware = isStalkerware,
+                                    stalkerwareIndicators = if (isStalkerware) audit.findings.filter { it.title.contains("stalkerware", ignoreCase = true) }.map { it.title } else emptyList(),
+                                    suspiciousPermissions = suspiciousPerms
+                                )
+                            }
+                            
+                            val pdfFile = com.guardianos.core.pdf.ItextPDFGenerator.generateScanReport(
+                                context,
+                                scanResults,
+                                forensicMode = false
+                            )
+                            
+                            withContext(Dispatchers.Main) {
+                                val uri = androidx.core.content.FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.fileprovider",
+                                    pdfFile
+                                )
+                                
+                                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                                    setDataAndType(uri, "application/pdf")
+                                    flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                }
+                                
+                                try {
+                                    context.startActivity(intent)
+                                } catch (e: Exception) {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "No hay app para abrir PDFs. Instala un lector de PDF.",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Error al generar PDF: ${e.message}",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF5D8BF4)
+                )
+            ) {
+                Text("📄 Ver PDF")
             }
         }
     }

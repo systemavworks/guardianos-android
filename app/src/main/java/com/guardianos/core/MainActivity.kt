@@ -42,6 +42,7 @@ import com.guardianos.core.pro.ui.ForensicReportScreen
 import com.guardianos.core.pro.ui.PrivacyProactiveScreen
 import com.guardianos.core.pro.ui.ConsultingScreen
 import com.guardianos.core.pro.ui.ScanHistoryScreen
+import com.guardianos.core.pro.ui.StalkerwareScreen
 import com.guardianos.vault.ui.MasterPasswordSetupScreen
 import com.guardianos.vault.ui.VaultUnlockScreen
 import com.guardianos.vault.ui.FamilyVaultMainScreen
@@ -70,12 +71,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -85,6 +87,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -183,8 +186,10 @@ class MainActivity : ComponentActivity() {
         val filePickerLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.GetContent()
         ) { uri: Uri? ->
+            Log.d(TAG, "File picker callback: uri=$uri")
             uri?.let {
                 try {
+                    Log.d(TAG, "Intentando leer archivo desde URI: $it")
                     val inputStream = context.contentResolver.openInputStream(it)
                     fileBytes = inputStream?.readBytes()
                     inputStream?.close()
@@ -196,6 +201,7 @@ class MainActivity : ComponentActivity() {
                             val nameIndex = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                             if (nameIndex >= 0) {
                                 selectedFileName = c.getString(nameIndex)
+                                Log.d(TAG, "Nombre archivo seleccionado: $selectedFileName, tamaño: ${fileBytes?.size} bytes")
                             }
                         }
                     }
@@ -205,10 +211,15 @@ class MainActivity : ComponentActivity() {
                     }
                     
                     error = ""
+                    Toast.makeText(context, "✓ Archivo cargado: $selectedFileName", Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
                     error = "Error al leer archivo: ${e.localizedMessage}"
                     Log.e(TAG, "Error reading file", e)
+                    Toast.makeText(context, error, Toast.LENGTH_LONG).show()
                 }
+            } ?: run {
+                Log.w(TAG, "File picker retornó URI nulo - usuario canceló o error de permisos")
+                Toast.makeText(context, "No se seleccionó ningún archivo", Toast.LENGTH_SHORT).show()
             }
         }
         
@@ -332,8 +343,15 @@ class MainActivity : ComponentActivity() {
                 onClick = { 
                     if (password.isBlank()) {
                         error = "❌ Configura una contraseña primero"
+                        Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
                     } else {
-                        filePickerLauncher.launch("*/*")
+                        Log.d(TAG, "Lanzando file picker...")
+                        try {
+                            filePickerLauncher.launch("*/*")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error al lanzar file picker", e)
+                            Toast.makeText(context, "Error al abrir selector de archivos: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -685,9 +703,25 @@ class MainActivity : ComponentActivity() {
                                     scope.launch {
                                         isAnalyzingISO = true
                                         try {
-                                            isoResults = performISOAudit(context)
+                                            // Timeout de 30 segundos para evitar bloqueos
+                                            isoResults = kotlinx.coroutines.withTimeout(30_000L) {
+                                                performISOAudit(context)
+                                            }
+                                        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                                            Log.e(TAG, "ISO audit timeout after 30 seconds", e)
+                                            Toast.makeText(
+                                                context,
+                                                "⚠️ Auditoría ISO excedió el tiempo límite. Intenta de nuevo.",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                            isoResults = emptyList()
                                         } catch (e: Exception) {
                                             Log.e(TAG, "Error during ISO audit", e)
+                                            Toast.makeText(
+                                                context,
+                                                "Error en auditoría ISO: ${e.localizedMessage}",
+                                                Toast.LENGTH_LONG
+                                            ).show()
                                         } finally {
                                             isAnalyzingISO = false
                                         }
@@ -743,6 +777,17 @@ class MainActivity : ComponentActivity() {
                                     Toast.makeText(
                                         context,
                                         "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onStalkerwareScan = {
+                                if (isPro.value) {
+                                    currentScreen = "stalkerware"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Detección de stalkerware requiere GuardianOS PRO.",
                                         Toast.LENGTH_SHORT
                                     ).show()
                                 }
@@ -886,6 +931,7 @@ class MainActivity : ComponentActivity() {
                         
                         "network" -> NetworkAnalyzerScreen(onBack = { currentScreen = "home" })
                         "media" -> MediaAccessScreen(context = context, onBack = { currentScreen = "home" })
+                        "stalkerware" -> StalkerwareScreen(context = context, onBack = { currentScreen = "home" })
                         "forensic" -> ForensicReportScreen(results = scanResults, onBack = { currentScreen = "home" })
                         "privacy" -> PrivacyProactiveScreen(context = context, onBack = { currentScreen = "home" })
                         "consulting" -> ConsultingScreen(context = context, pdfPath = pdfPath, onBack = { currentScreen = "home" })
@@ -984,6 +1030,7 @@ class MainActivity : ComponentActivity() {
         onISOAudit: () -> Unit,
         onNetworkMonitor: () -> Unit,
         onMediaAccess: () -> Unit,
+        onStalkerwareScan: () -> Unit = {},
         onForensicReport: () -> Unit,
         onPrivacyProactive: () -> Unit,
         onConsulting: () -> Unit,
@@ -1110,12 +1157,12 @@ class MainActivity : ComponentActivity() {
 
             if (isPro) {
                 FeatureCard(
-                    icon = "👁️",
+                    icon = "�",
                     title = "Stalkerware Detection",
-                    description = "Detecta apps que espían sin consentimiento",
-                    onClick = onStartScan,
+                    description = "Sistema avanzado de detección de apps espía (3 detectores)",
+                    onClick = onStalkerwareScan,
                     isPro = true,
-                    color = Color(0xFF8B5CF6)
+                    color = Color(0xFFDC2626)
                 )
                 FeatureCard(
                     icon = "🛡️",
@@ -1485,17 +1532,63 @@ class MainActivity : ComponentActivity() {
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        CircularProgressIndicator()
                         Spacer(Modifier.height(16.dp))
+                        Text("Escaneando aplicaciones...", fontSize = 14.sp, color = Color.Gray)
+                    }
+                }
+            } else if (results.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = "Escaneando aplicaciones...",
+                            "⚠️ No se encontraron resultados",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Intenta ejecutar el escaneo nuevamente",
+                            fontSize = 14.sp,
                             color = Color.Gray
                         )
+                        Spacer(Modifier.height(16.dp))
+                        Button(onClick = onBack) {
+                            Text("Volver")
+                        }
                     }
                 }
             } else {
+                // Info del dispositivo
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "📱 ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "Android ${android.os.Build.VERSION.RELEASE}",
+                                fontSize = 13.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(12.dp))
+                
                 // Summary Card
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -2642,7 +2735,12 @@ class MainActivity : ComponentActivity() {
                         .padding(24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text("🛡️", fontSize = 64.sp)
+                    // Logo del launcher en lugar del emoji
+                    Image(
+                        painter = painterResource(id = R.mipmap.ic_launcher),
+                        contentDescription = "GuardianOS Logo",
+                        modifier = Modifier.size(80.dp)
+                    )
                     Spacer(Modifier.height(12.dp))
                     Text(
                         text = "GuardianOS",
@@ -2656,7 +2754,7 @@ class MainActivity : ComponentActivity() {
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        text = "Protección Digital Ética para Menores",
+                        text = "Protección Digital Ética para dispositivos móviles",
                         fontSize = 16.sp,
                         color = Color(0xFF5D8BF4),
                         fontWeight = FontWeight.Medium,
@@ -3590,28 +3688,29 @@ class MainActivity : ComponentActivity() {
                         
                         val allSuspicious = (privacyPerms + extraProPerms).distinct()
                         
-                        // Solo incluir apps que tengan algo relevante
-                        val isRelevant = isMalware || isStalkerware || allSuspicious.isNotEmpty()
-                        
-                        if (isRelevant) {
-                            results.add(
-                                AppScanResult(
-                                    appName = appName,
-                                    packageName = packageName,
-                                    isMalware = isMalware,
-                                    malwareType = malwareType,
-                                    isStalkerware = isStalkerware,
-                                    stalkerwareIndicators = stalkerwareIndicators,
-                                    suspiciousPermissions = allSuspicious
-                                )
+                        // INCLUIR TODAS LAS APPS, no solo las "relevantes"
+                        // Esto evita que el usuario vea una lista vacía en dispositivos limpios
+                        // Las apps peligrosas se ordenarán primero por sorting posterior
+                        results.add(
+                            AppScanResult(
+                                appName = appName,
+                                packageName = packageName,
+                                isMalware = isMalware,
+                                malwareType = malwareType,
+                                isStalkerware = isStalkerware,
+                                stalkerwareIndicators = stalkerwareIndicators,
+                                suspiciousPermissions = allSuspicious
                             )
-                        }
+                        )
                     } catch (e: Exception) {
                         Log.e(TAG, "Error scanning app: ${packageInfo.packageName}", e)
                     }
                 }
                 
-                results.sortedWith(
+                Log.d(TAG, "Escaneo completado: ${results.size} apps analizadas")
+                
+                // IMPORTANTE: Devolver la lista ordenada (no solo ordenar en memoria)
+                return@withContext results.sortedWith(
                     compareByDescending<AppScanResult> { it.isMalware || it.isStalkerware }
                         .thenByDescending { it.suspiciousPermissions.size }
                 )
@@ -3628,7 +3727,7 @@ class MainActivity : ComponentActivity() {
                 // Primero obtener auditoría de apps
                 val apps = appAuditor.auditApps(context, AuditMode.FULL)
                 
-                // Usar ISOAuditor (es un object, no necesita constructor)
+                // Usar ISOAuditor con controles completos ISO 27001:2022
                 val report = ISOAuditor.auditISO27001(context, apps)
                 
                 // Convertir a lista de violaciones simples
@@ -3638,10 +3737,10 @@ class MainActivity : ComponentActivity() {
                             control = control.id,
                             description = control.name,
                             severity = when (control.severity) {
-                                ControlSeverity.CRITICAL -> "critical"
-                                ControlSeverity.HIGH -> "high"
-                                ControlSeverity.MEDIUM -> "medium"
-                                ControlSeverity.LOW -> "low"
+                                com.guardianos.core.domain.model.ControlSeverity.CRITICAL -> "critical"
+                                com.guardianos.core.domain.model.ControlSeverity.HIGH -> "high"
+                                com.guardianos.core.domain.model.ControlSeverity.MEDIUM -> "medium"
+                                com.guardianos.core.domain.model.ControlSeverity.LOW -> "low"
                             },
                             recommendation = control.findings.firstOrNull() ?: "Revisar configuración"
                         ))

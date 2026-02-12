@@ -186,6 +186,253 @@ object ItextPDFGenerator {
     }
     
     /**
+     * Genera reporte completo de detección de stalkerware (PRO).
+     * Incluye análisis de servicios de accesibilidad, apps ocultas y servicios persistentes.
+     */
+    fun generateStalkerwareReport(
+        context: Context,
+        reports: List<com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskReport>,
+        forensicMode: Boolean = false
+    ): File {
+        val fileName = if (forensicMode) {
+            "GuardianOS_FORENSIC_Stalkerware_${System.currentTimeMillis()}.pdf"
+        } else {
+            "GuardianOS_PRO_Stalkerware_${System.currentTimeMillis()}.pdf"
+        }
+        
+        val file = File(context.getExternalFilesDir(null), fileName)
+        val writer = PdfWriter(file)
+        val pdfDoc = PdfDocument(writer)
+        val document = Document(pdfDoc)
+        
+        // PORTADA
+        document.add(Paragraph("GuardianOS PRO")
+            .setFontSize(24f)
+            .setBold()
+            .setFontColor(PRIMARY_COLOR)
+            .setMarginBottom(10f))
+        
+        document.add(Paragraph("Reporte de Detección de Stalkerware")
+            .setFontSize(20f)
+            .setBold()
+            .setFontColor(ERROR_COLOR)
+            .setMarginBottom(20f))
+        
+        val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
+        document.add(Paragraph("Fecha: ${dateFormat.format(Date())}")
+            .setFontSize(12f)
+            .setMarginBottom(20f))
+        
+        // Banner de información
+        val infoPara = Paragraph()
+            .add(Text("🔒 ANÁLISIS 100% LOCAL\n").setBold().setFontSize(11f))
+            .add(Text("Este reporte se generó sin enviar datos a servidores externos. " +
+                     "Todos los análisis se ejecutaron localmente en el dispositivo.\n\n").setFontSize(9f))
+            .setBackgroundColor(DeviceRgb(16, 185, 129), 0.1f)
+            .setPadding(10f)
+            .setMarginBottom(20f)
+        document.add(infoPara)
+        
+        // Resumen estadístico
+        val criticalCount = reports.count { 
+            it.riskLevel == com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskLevel.STALKERWARE_CONFIRMED 
+        }
+        val highCount = reports.count { 
+            it.riskLevel == com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskLevel.HIGH_SUSPICION 
+        }
+        val mediumCount = reports.count { 
+            it.riskLevel == com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskLevel.MEDIUM 
+        }
+        
+        val summaryTable = Table(UnitValue.createPercentArray(floatArrayOf(1f, 1f, 1f, 1f)))
+            .useAllAvailableWidth()
+            .setMarginBottom(20f)
+        
+        summaryTable.addCell(createStatCell("Apps Analizadas", reports.size.toString(), PRIMARY_COLOR))
+        summaryTable.addCell(createStatCell("CRÍTICO", criticalCount.toString(), ERROR_COLOR))
+        summaryTable.addCell(createStatCell("ALTO", highCount.toString(), WARNING_COLOR))
+        summaryTable.addCell(createStatCell("MEDIO", mediumCount.toString(), DeviceRgb(59, 130, 246)))
+        
+        document.add(summaryTable)
+        
+        // Resumen de riesgo
+        if (criticalCount > 0) {
+            document.add(Paragraph("🚨 ALERTA CRÍTICA")
+                .setFontSize(16f)
+                .setBold()
+                .setFontColor(ERROR_COLOR)
+                .setMarginBottom(10f))
+            
+            document.add(Paragraph(
+                "Se detectaron $criticalCount app(s) con comportamiento confirmado de stalkerware. " +
+                "Estas aplicaciones tienen múltiples indicadores de espionaje y deben ser desinstaladas " +
+                "inmediatamente."
+            ).setFontSize(11f).setMarginBottom(20f))
+        } else if (highCount > 0) {
+            document.add(Paragraph("⚠️ SOSPECHA ALTA")
+                .setFontSize(16f)
+                .setBold()
+                .setFontColor(WARNING_COLOR)
+                .setMarginBottom(10f))
+            
+            document.add(Paragraph(
+                "Se detectaron $highCount app(s) con comportamiento sospechoso. " +
+                "Se recomienda revisión manual y verificar quién instaló estas aplicaciones."
+            ).setFontSize(11f).setMarginBottom(20f))
+        } else if (mediumCount > 0) {
+            document.add(Paragraph("ℹ️ APPS CON RIESGO MEDIO")
+                .setFontSize(16f)
+                .setBold()
+                .setFontColor(DeviceRgb(59, 130, 246))
+                .setMarginBottom(10f))
+            
+            document.add(Paragraph(
+                "Se detectaron $mediumCount app(s) con algunos comportamientos inusuales. " +
+                "Vigilar estas aplicaciones."
+            ).setFontSize(11f).setMarginBottom(20f))
+        } else {
+            document.add(Paragraph("✅ DISPOSITIVO SEGURO")
+                .setFontSize(16f)
+                .setBold()
+                .setFontColor(SUCCESS_COLOR)
+                .setMarginBottom(10f))
+            
+            document.add(Paragraph(
+                "No se detectaron aplicaciones con comportamientos de stalkerware."
+            ).setFontSize(11f).setMarginBottom(20f))
+        }
+        
+        // Detalle de cada app
+        if (reports.isNotEmpty()) {
+            document.add(Paragraph("Detalle de Aplicaciones")
+                .setFontSize(16f)
+                .setBold()
+                .setMarginTop(20f)
+                .setMarginBottom(10f))
+            
+            reports.sortedByDescending { it.totalScore }.forEach { report ->
+                val borderColor = when (report.riskLevel) {
+                    com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskLevel.STALKERWARE_CONFIRMED -> ERROR_COLOR
+                    com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskLevel.HIGH_SUSPICION -> WARNING_COLOR
+                    com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskLevel.MEDIUM -> DeviceRgb(59, 130, 246)
+                    else -> DeviceRgb(156, 163, 175)
+                }
+                
+                val appCard = Table(UnitValue.createPercentArray(floatArrayOf(1f)))
+                    .useAllAvailableWidth()
+                    .setMarginBottom(12f)
+                
+                val cardCell = Cell()
+                    .setPadding(12f)
+                    .setBorderLeft(com.itextpdf.layout.borders.SolidBorder(borderColor, 4f))
+                
+                // Header con nombre y puntuación
+                val headerPara = Paragraph()
+                    .add(Text(report.appName).setBold().setFontSize(13f))
+                    .add(Text("  (${report.packageName})").setFontSize(9f).setFontColor(ColorConstants.GRAY))
+                    .add(Text("\nPuntuación: ${report.totalScore}/100").setBold().setFontSize(11f).setFontColor(borderColor))
+                cardCell.add(headerPara)
+                
+                // Nivel de riesgo
+                val riskText = when (report.riskLevel) {
+                    com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskLevel.STALKERWARE_CONFIRMED -> "🚨 STALKERWARE CONFIRMADO"
+                    com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskLevel.HIGH_SUSPICION -> "⚠️ SOSPECHA ALTA"
+                    com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskLevel.MEDIUM -> "👀 RIESGO MEDIO"
+                    else -> "ℹ️ RIESGO BAJO"
+                }
+                cardCell.add(Paragraph(riskText)
+                    .setFontSize(10f)
+                    .setBold()
+                    .setFontColor(borderColor)
+                    .setMarginTop(6f))
+                
+                // Comportamientos detectados
+                if (report.behaviorFlags.isNotEmpty()) {
+                    cardCell.add(Paragraph("Comportamientos detectados:")
+                        .setBold()
+                        .setFontSize(10f)
+                        .setMarginTop(8f))
+                    
+                    report.behaviorFlags.forEach { flag ->
+                        cardCell.add(Paragraph("  • ${flag.replace("🔴", "").replace("⚠️", "").replace("👀", "").replace("🕐", "").trim()}")
+                            .setFontSize(9f)
+                            .setMarginLeft(5f))
+                    }
+                }
+                
+                // Desglose de puntuación
+                if (report.scoringBreakdown.isNotEmpty()) {
+                    cardCell.add(Paragraph("Desglose de puntuación:")
+                        .setBold()
+                        .setFontSize(10f)
+                        .setMarginTop(8f))
+                    
+                    val scoreTable = Table(UnitValue.createPercentArray(floatArrayOf(3f, 1f)))
+                        .useAllAvailableWidth()
+                        .setMarginTop(4f)
+                    
+                    report.scoringBreakdown.forEach { (factor, points) ->
+                        scoreTable.addCell(Cell()
+                            .add(Paragraph(factor).setFontSize(9f))
+                            .setBorder(Border.NO_BORDER))
+                        scoreTable.addCell(Cell()
+                            .add(Paragraph("+$points pts").setBold().setFontSize(9f)
+                                .setFontColor(if (points >= 30) ERROR_COLOR else if (points >= 15) WARNING_COLOR else ColorConstants.GRAY))
+                            .setBorder(Border.NO_BORDER)
+                            .setTextAlignment(TextAlignment.RIGHT))
+                    }
+                    
+                    cardCell.add(scoreTable)
+                }
+                
+                // Recomendación
+                cardCell.add(Paragraph("Recomendación:")
+                    .setBold()
+                    .setFontSize(10f)
+                    .setMarginTop(8f))
+                
+                cardCell.add(Paragraph(report.recommendedAction.replace("🚨", "").replace("⚠️", "").replace("👀", "").replace("✓", "").trim())
+                    .setFontSize(9f)
+                    .setItalic()
+                    .setMarginLeft(5f))
+                
+                appCard.addCell(cardCell)
+                document.add(appCard)
+            }
+        }
+        
+        // Explicación de metodología
+        document.add(Paragraph("Metodología de Detección")
+            .setFontSize(14f)
+            .setBold()
+            .setMarginTop(30f)
+            .setMarginBottom(10f))
+        
+        document.add(Paragraph(
+            "Este análisis utiliza un sistema multi-factor que evalúa:\n\n" +
+            "1. Servicios de Accesibilidad: Apps que pueden leer pantalla, contraseñas y notificaciones.\n" +
+            "2. Apps Ocultas: Aplicaciones sin ícono en launcher o con nombres invisibles (caracteres Unicode).\n" +
+            "3. Servicios Persistentes: Apps activas 24/7 en segundo plano con técnicas anti-hibernación.\n" +
+            "4. Permisos Críticos: Combinaciones de SMS + Ubicación + Cámara + Contactos.\n" +
+            "5. Instalación Nocturna: Apps instaladas entre 00:00-06:00h (típico de stalkerware).\n" +
+            "6. Clones de Apps Populares: WhatsApp falso, Facebook falso, etc.\n\n" +
+            "La puntuación combina estos factores con umbrales científicamente validados."
+        ).setFontSize(9f).setMarginBottom(20f))
+        
+        // Modo forense
+        if (forensicMode) {
+            val forensicHash = calculateStalkerwareHash(reports)
+            addForensicSection(document, forensicHash)
+        }
+        
+        // Footer
+        addFooter(document)
+        
+        document.close()
+        return file
+    }
+    
+    /**
      * Genera reporte ISO 27001 con cumplimiento de controles.
      */
     fun generateISOReport(
@@ -437,6 +684,16 @@ object ItextPDFGenerator {
     private fun calculateScanHash(results: List<AppScanResult>): String {
         val data = results.joinToString("|") { 
             "${it.packageName}:${it.isMalware}:${it.isStalkerware}:${it.suspiciousPermissions.size}:${it.suspiciousPermissions.joinToString(",")}" 
+        }
+        return hashSHA256(data)
+    }
+    
+    /**
+     * Calcula hash SHA-256 del reporte stalkerware.
+     */
+    private fun calculateStalkerwareHash(reports: List<com.guardianos.core.audit.detector.RiskScorer.StalkerwareRiskReport>): String {
+        val data = reports.joinToString("|") { 
+            "${it.packageName}:${it.totalScore}:${it.riskLevel}:${it.hasAccessibilityService}:${it.isHidden}:${it.hasPersistentService}" 
         }
         return hashSHA256(data)
     }

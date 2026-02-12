@@ -10,6 +10,10 @@ import android.provider.Settings
 import android.util.Log
 import com.guardianos.core.data.MalwareDatabase
 import com.guardianos.core.audit.detector.StalkerwareDetector
+import com.guardianos.core.audit.detector.RiskScorer
+import com.guardianos.core.audit.detector.AccessibilityMonitor
+import com.guardianos.core.audit.detector.HiddenAppsDetector
+import com.guardianos.core.audit.detector.BackgroundServicesAnalyzer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -119,25 +123,45 @@ class AppAuditor(
                     score += iocCheck.score
                 }
 
-                // 🔴 CAPA 5: STALKERWARE DETECTION (solo FULL/PRO)
+                // 🔴 CAPA 5: STALKERWARE DETECTION 2.0 (solo FULL/PRO)
+                // Sistema unificado con AccessibilityMonitor + HiddenAppsDetector + BackgroundServicesAnalyzer
                 if (mode == AuditMode.FULL) {
-                    val stalkerwareDetector = StalkerwareDetector(context)
-                    val stalkerwareResults = stalkerwareDetector.analyzeApp(app.packageName)
-                    if (stalkerwareResults != null) {
-                        // CRÍTICO: Stalkerware detectado
-                        findings.add(AuditFinding(
-                            "🚨 STALKERWARE DETECTADO",
-                            stalkerwareResults.reason,
-                            90  // Peso máximo
-                        ))
-                        stalkerwareResults.indicators.forEach { indicator ->
+                    try {
+                        // Obtener reportes de los 3 detectores
+                        val accessibilityReports = AccessibilityMonitor.scanAccessibilityServices(context)
+                            .associateBy { it.packageName }
+                        val hiddenAppReports = HiddenAppsDetector.scanHiddenApps(context)
+                            .associateBy { it.packageName }
+                        val serviceReports = BackgroundServicesAnalyzer.analyzeBackgroundServices(context)
+                            .associateBy { it.packageName }
+                        
+                        // Calcular score stalkerware para esta app
+                        val stalkerwareReport = RiskScorer.calculateStalkerwareRisk(
+                            context,
+                            app.packageName,
+                            accessibilityReports[app.packageName],
+                            hiddenAppReports[app.packageName],
+                            serviceReports[app.packageName]
+                        )
+                        
+                        // Solo añadir findings si hay riesgo detectado
+                        if (stalkerwareReport.riskLevel != RiskScorer.StalkerwareRiskLevel.SAFE) {
                             findings.add(AuditFinding(
-                                "⚠️ Indicador de espionaje",
-                                indicator,
-                                25
+                                title = when (stalkerwareReport.riskLevel) {
+                                    RiskScorer.StalkerwareRiskLevel.STALKERWARE_CONFIRMED -> "🚨 STALKERWARE CONFIRMADO"
+                                    RiskScorer.StalkerwareRiskLevel.HIGH_SUSPICION -> "⚠️ SOSPECHA ALTA DE STALKERWARE"
+                                    RiskScorer.StalkerwareRiskLevel.MEDIUM -> "⚠️ COMPORTAMIENTO SOSPECHOSO"
+                                    else -> "ℹ️ RIESGO BAJO"
+                                },
+                                description = "Puntuación: ${stalkerwareReport.totalScore}/100\n" +
+                                            "Comportamientos detectados:\n${stalkerwareReport.behaviorFlags.joinToString("\n")}\n\n" +
+                                            stalkerwareReport.recommendedAction,
+                                weight = stalkerwareReport.totalScore
                             ))
+                            score += stalkerwareReport.totalScore
                         }
-                        score += 90
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error en detección stalkerware para ${app.packageName}: ${e.message}")
                     }
                 }
 

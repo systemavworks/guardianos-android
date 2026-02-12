@@ -54,46 +54,26 @@ fun PermissionTransparencyDashboard(
     onViewHistory: (() -> Unit)? = null
 ) {
     val scope = rememberCoroutineScope()
-    val recentUsages = remember { mutableStateListOf<ActivePermissionUsage>() }
-    val activeSessions = remember { mutableStateListOf<ActivePermissionUsage>() }
     
-    // Escuchar eventos en tiempo real
-    LaunchedEffect(monitor) {
-        scope.launch {
-            monitor.activeUsages.collect { usage ->
-                // Agregar al historial
-                recentUsages.add(0, usage)
-                if (recentUsages.size > 50) recentUsages.removeAt(recentUsages.size - 1)
-                
-                // Actualizar sesiones activas
-                if (usage.isActive) {
-                    val existing = activeSessions.indexOfFirst {
-                        it.packageName == usage.packageName && it.permissionType == usage.permissionType
-                    }
-                    if (existing >= 0) {
-                        activeSessions[existing] = usage
-                    } else {
-                        activeSessions.add(usage)
-                    }
-                } else {
-                    // Remover sesiones finalizadas
-                    activeSessions.removeAll {
-                        it.packageName == usage.packageName && it.permissionType == usage.permissionType
-                    }
-                }
-            }
-        }
+    // Historial persistente guardado en SharedPreferences (única fuente de datos confiable)
+    var savedHistory by remember { mutableStateOf<List<String>>(emptyList()) }
+    
+    // Estado real del servicio (sincronizado con SharedPreferences)
+    var isServiceActive by remember { 
+        mutableStateOf(com.guardianos.core.monitor.GuardianShieldService.isRunning(context)) 
     }
     
-    // Actualizar sesiones activas periódicamente
-    LaunchedEffect(monitor.isMonitoring) {
-        if (monitor.isMonitoring) {
-            while (true) {
-                kotlinx.coroutines.delay(1000)
-                val current = monitor.getActiveSessions()
-                activeSessions.clear()
-                activeSessions.addAll(current)
-            }
+    // Cargar historial persistente al inicio
+    LaunchedEffect(Unit) {
+        savedHistory = com.guardianos.core.monitor.GuardianShieldService.getPermissionAccessHistory(context)
+    }
+    
+    // Recargar historial cada 5 segundos para mostrar nuevas detecciones
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(5000)
+            savedHistory = com.guardianos.core.monitor.GuardianShieldService.getPermissionAccessHistory(context)
+            isServiceActive = com.guardianos.core.monitor.GuardianShieldService.isRunning(context)
         }
     }
     
@@ -247,7 +227,7 @@ fun PermissionTransparencyDashboard(
         
         // Control de monitorización
         GuardianShieldControlCard(
-            isActive = monitor.isMonitoring,
+            isActive = isServiceActive,
             onToggle = { shouldActivate ->
                 if (shouldActivate) {
                     // Verificar y solicitar permiso de notificaciones en Android 13+
@@ -272,6 +252,7 @@ fun PermissionTransparencyDashboard(
                     
                     monitor.startMonitoring()
                     com.guardianos.core.monitor.GuardianShieldService.start(context)
+                    isServiceActive = true
                     Toast.makeText(
                         context,
                         "✅ Guardian Shield activado",
@@ -280,7 +261,7 @@ fun PermissionTransparencyDashboard(
                 } else {
                     monitor.stopMonitoring()
                     com.guardianos.core.monitor.GuardianShieldService.stop(context)
-                    activeSessions.clear()
+                    isServiceActive = false
                     Toast.makeText(
                         context,
                         "Guardian Shield desactivado",
@@ -304,60 +285,84 @@ fun PermissionTransparencyDashboard(
         
         Spacer(Modifier.height(20.dp))
         
-        // Sesiones activas AHORA
-        if (monitor.isMonitoring && activeSessions.isNotEmpty()) {
-            Text(
-                text = "🔴 Accesos ACTIVOS ahora (${activeSessions.size})",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF5D8BF4)
-            )
-            Spacer(Modifier.height(12.dp))
-            
-            activeSessions.forEach { usage ->
-                PermissionUsageCard(usage, isRecent = true, isActive = true)
-                Spacer(Modifier.height(8.dp))
-            }
-            
-            Spacer(Modifier.height(20.dp))
-        }
-        
-        // Timeline de accesos recientes
+        // HISTORIAL GUARDADO: Única fuente de datos confiable
+        // (GuardianShieldService guarda detecciones en SharedPreferences)
         Text(
-            text = "📅 Historial Reciente${if (recentUsages.isNotEmpty()) " (${recentUsages.size})" else ""}",
+            text = "💾 Historial de Detecciones${if (savedHistory.isNotEmpty()) " (${savedHistory.size})" else ""}",
             fontSize = 18.sp,
             fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary
+            color = Color(0xFF5D8BF4)
         )
         Spacer(Modifier.height(12.dp))
         
-        if (recentUsages.isEmpty()) {
-            EmptyStateCard(
-                icon = "🔍",
-                title = "Sin accesos registrados",
-                description = if (monitor.isMonitoring) {
-                    "Cuando una app use permisos sensibles (cámara, micrófono, ubicación), aparecerá aquí en tiempo real."
-                } else {
-                    "Activa Guardian Shield arriba para comenzar la monitorización."
+        if (savedHistory.isEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF5D8BF4).copy(alpha = 0.1f)
+                ),
+                border = BorderStroke(1.dp, Color(0xFF5D8BF4))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("ℹ️", fontSize = 28.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = "¿Cómo funciona Guardian Shield?",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF5D8BF4)
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    
+                    if (isServiceActive) {
+                        Text(
+                            text = "✓ Guardian Shield está ACTIVO\n\n" +
+                                   "🔍 Detecta apps cuando las ABRES:\n" +
+                                   "• Cada vez que abres una app (WhatsApp, Instagram, etc.)\n" +
+                                   "• Guardian Shield verifica qué permisos peligrosos tiene concedidos\n" +
+                                   "• Si tiene permisos sensibles (cámara, ubicación, micrófono), recibirás una notificación silenciosa\n\n" +
+                                   "💡 Prueba abriendo WhatsApp o cualquier app con permisos de cámara/ubicación para ver el sistema en acción.\n\n" +
+                                   "⚠️ NO es monitoreo histórico: solo detecta apps al abrirse (Android limita qué podemos ver sin root).",
+                            fontSize = 14.sp,
+                            color = Color.Gray,
+                            lineHeight = 20.sp
+                        )
+                    } else {
+                        Text(
+                            text = "❌ Guardian Shield está inactivo\n\n" +
+                                   "Activa el switch arriba para comenzar la monitorización en tiempo real.",
+                            fontSize = 14.sp,
+                            color = Color.Gray,
+                            lineHeight = 20.sp
+                        )
+                    }
                 }
-            )
+            }
         } else {
-            recentUsages.take(20).forEach { usage ->
-                PermissionUsageCard(usage, isRecent = false, isActive = usage.isActive)
+            // Mostrar todas las detecciones guardadas
+            savedHistory.forEach { entry ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF5D8BF4).copy(alpha = 0.08f)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = entry,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            lineHeight = 18.sp
+                        )
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
             }
-            
-            if (recentUsages.size > 20) {
-                Text(
-                    text = "... y ${recentUsages.size - 20} accesos más antiguos",
-                    fontSize = 12.sp,
-                    color = Color.Gray,
-                    modifier = Modifier.padding(8.dp)
-                )
-            }
         }
-        
-        Spacer(Modifier.height(20.dp))
         
         // Botón para ver historial completo guardado (solo si se proporciona el callback)
         if (onViewHistory != null) {

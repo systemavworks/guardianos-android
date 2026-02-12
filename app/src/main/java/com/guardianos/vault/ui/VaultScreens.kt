@@ -1,6 +1,7 @@
 package com.guardianos.vault.ui
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,9 +21,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardianos.core.pro.*
@@ -350,6 +353,8 @@ fun FamilyVaultMainScreen(
     var selectedCategory by remember { mutableStateOf("Todas") }
     var searchQuery by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
+    var showDocumentsSection by remember { mutableStateOf(false) }
+    var showPasswordGenerator by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     
     val categories = listOf(
@@ -357,8 +362,38 @@ fun FamilyVaultMainScreen(
         "Streaming", "Compras", "Juegos", "Otras"
     )
     
+    // Auto-logout por inactividad
+    DisposableEffect(Unit) {
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val checkAutoLogout = object : Runnable {
+            override fun run() {
+                if (VaultSecurityManager.shouldAutoLogout(context)) {
+                    android.widget.Toast.makeText(
+                        context,
+                        "⏱️ Sesión cerrada por inactividad",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                    onBack()
+                } else {
+                    handler.postDelayed(this, 5000) // Verificar cada 5 segundos
+                }
+            }
+        }
+        handler.post(checkAutoLogout)
+        
+        onDispose {
+            handler.removeCallbacks(checkAutoLogout)
+        }
+    }
+    
+    // Actualizar timestamp cada vez que el usuario interactúa
+    LaunchedEffect(searchQuery, selectedCategory) {
+        VaultSecurityManager.updateLastAccess(context)
+    }
+    
     // Cargar credenciales
     LaunchedEffect(Unit) {
+        VaultSecurityManager.updateLastAccess(context)
         FamilyVault.loadCredentials(context).onSuccess {
             credentials = it
         }.onFailure {
@@ -384,6 +419,39 @@ fun FamilyVaultMainScreen(
         filtered.sortedByDescending { it.lastModified }
     }
     
+    // Navegar a Documentos seguros (pantalla completa)
+    if (showDocumentsSection) {
+        SecureDocumentsScreen(
+            context = context,
+            onBack = { showDocumentsSection = false }
+        )
+        return
+    }
+    
+    // Generador de contraseñas (dialog)
+    if (showPasswordGenerator) {
+        PasswordGeneratorDialog(
+            onDismiss = { showPasswordGenerator = false }
+        )
+    }
+    
+    // Diálogo para añadir credencial
+    if (showAddDialog) {
+        AddCredentialDialog(
+            context = context,
+            onDismiss = { showAddDialog = false },
+            onSaved = {
+                scope.launch {
+                    FamilyVault.loadCredentials(context).onSuccess {
+                        credentials = it
+                    }
+                }
+                showAddDialog = false
+            }
+        )
+    }
+    
+    // === PANTALLA PRINCIPAL DE CREDENCIALES ===
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -406,8 +474,44 @@ fun FamilyVaultMainScreen(
                 )
             }
             
-            IconButton(onClick = { showAddDialog = true }) {
-                Icon(Icons.Default.Add, contentDescription = "Añadir")
+            Row {
+                // Menú de opciones
+                var showMenu by remember { mutableStateOf(false) }
+                
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "Más opciones")
+                }
+                
+                androidx.compose.material3.DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("✨ Generador de contraseñas") },
+                        onClick = {
+                            showMenu = false
+                            showPasswordGenerator = true
+                        }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("📄 Documentos seguros") },
+                        onClick = {
+                            showMenu = false
+                            showDocumentsSection = true
+                        }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("⏱️ Cerrar sesión") },
+                        onClick = {
+                            showMenu = false
+                            onBack()
+                        }
+                    )
+                }
+                
+                IconButton(onClick = { showAddDialog = true }) {
+                    Icon(Icons.Default.Add, contentDescription = "Añadir credencial")
+                }
             }
         }
         
@@ -476,22 +580,6 @@ fun FamilyVaultMainScreen(
                 }
             }
         }
-    }
-    
-    // Diálogo para añadir credencial
-    if (showAddDialog) {
-        AddCredentialDialog(
-            context = context,
-            onDismiss = { showAddDialog = false },
-            onSaved = {
-                scope.launch {
-                    FamilyVault.loadCredentials(context).onSuccess {
-                        credentials = it
-                    }
-                }
-                showAddDialog = false
-            }
-        )
     }
 }
 
@@ -1053,117 +1141,6 @@ fun DocumentVaultMainScreen(
     }
 }
 
-@Composable
-fun DocumentCard(
-    context: Context,
-    document: FamilyDocument,
-    onDelete: () -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-    
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { expanded = !expanded },
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1A2332))
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        document.name,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        document.encryptedFilePath,
-                        fontSize = 13.sp,
-                        color = Color.Gray
-                    )
-                }
-                
-                Text(
-                    document.type.name,
-                    fontSize = 11.sp,
-                    color = Color(0xFF3B82F6),
-                    modifier = Modifier
-                        .background(
-                            Color(0xFF3B82F6).copy(alpha = 0.2f),
-                            RoundedCornerShape(4.dp)
-                        )
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                )
-            }
-            
-            Spacer(Modifier.height(4.dp))
-            
-            Text(
-                "Cifrado · ${document.type.name}",
-                fontSize = 11.sp,
-                color = Color.Gray
-            )
-            
-            if (expanded) {
-                Spacer(Modifier.height(12.dp))
-                HorizontalDivider()
-                Spacer(Modifier.height(12.dp))
-                
-                // FamilyDocument no tiene notes ni tags, solo mostrar info básica
-                Text("Tipo de documento:", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                Text(document.type.name, fontSize = 12.sp, color = Color.Gray)
-                Spacer(Modifier.height(8.dp))
-                
-                Text("Creado:", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                Text(document.createdAt.toString(), fontSize = 12.sp, color = Color.Gray)
-                Spacer(Modifier.height(8.dp))
-                
-                Text("Propietario:", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                Text(document.ownerRole.name, fontSize = 12.sp, color = Color.Gray)
-                Spacer(Modifier.height(12.dp))
-                
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    var showPreview by remember { mutableStateOf(false) }
-                    TextButton(onClick = { showPreview = true }) {
-                        Text("Ver documento")
-                    }
-                    if (showPreview) {
-                        AlertDialog(
-                            onDismissRequest = { showPreview = false },
-                            title = { Text("Vista previa de documento") },
-                            text = {
-                                Column {
-                                    Text("Nombre: ${document.name}")
-                                    Text("Tipo: ${document.type.name}")
-                                    Text("Creado: ${document.createdAt}")
-                                    Text("Propietario: ${document.ownerRole.name}")
-                                    Text("\nPara ver el contenido real, descifra el archivo desde la bóveda.", color = Color.Gray, fontSize = 12.sp)
-                                }
-                            },
-                            confirmButton = {
-                                TextButton(onClick = { showPreview = false }) { Text("Cerrar") }
-                            }
-                        )
-                    }
-                    
-                    TextButton(
-                        onClick = onDelete,
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
-                    ) {
-                        Text("Eliminar")
-                    }
-                }
-            }
-        }
-    }
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddDocumentDialog(
@@ -1352,4 +1329,499 @@ fun AddDocumentDialog(
             }
         }
     )
+}
+/**
+ * Diálogo para generar contraseñas seguras
+ */
+@Composable
+fun PasswordGeneratorDialog(
+    onDismiss: () -> Unit
+) {
+    var generatedPassword by remember { mutableStateOf("") }
+    var length by remember { mutableStateOf(16) }
+    var includeUppercase by remember { mutableStateOf(true) }
+    var includeNumbers by remember { mutableStateOf(true) }
+    var includeSymbols by remember { mutableStateOf(true) }
+    var copied by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    
+    // Generar contraseña inicial
+    LaunchedEffect(Unit) {
+        generatedPassword = PasswordGenerator.generate(
+            length = length,
+            includeUppercase = includeUppercase,
+            includeDigits = includeNumbers,
+            includeSpecial = includeSymbols
+        )
+    }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("✨ Generador de Contraseñas") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                // Contraseña generada
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF1A2332)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            generatedPassword,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = TextAlign.Center
+                        )
+                        
+                        Spacer(Modifier.height(8.dp))
+                        
+                        val strength = PasswordGenerator.evaluateStrength(generatedPassword)
+                        val (text, color) = when (strength) {
+                            PasswordGenerator.PasswordStrength.VERY_STRONG -> "Muy fuerte 💪" to Color(0xFF22C55E)
+                            PasswordGenerator.PasswordStrength.STRONG -> "Fuerte 👍" to Color(0xFF3B82F6)
+                            PasswordGenerator.PasswordStrength.MEDIUM -> "Regular ⚠️" to Color(0xFFFFA726)
+                            PasswordGenerator.PasswordStrength.WEAK -> "Débil 😟" to Color(0xFFFF6B6B)
+                            PasswordGenerator.PasswordStrength.VERY_WEAK -> "Muy débil ❌" to Color(0xFFDC2626)
+                        }
+                        Text(
+                            text,
+                            fontSize = 14.sp,
+                            color = color,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                // Longitud
+                Text("Longitud: $length caracteres", fontSize = 14.sp)
+                Slider(
+                    value = length.toFloat(),
+                    onValueChange = { length = it.toInt() },
+                    valueRange = 8f..32f,
+                    steps = 23
+                )
+                
+                Spacer(Modifier.height(8.dp))
+                
+                // Opciones
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = includeUppercase,
+                        onCheckedChange = { includeUppercase = it }
+                    )
+                    Text("Mayúsculas (A-Z)", fontSize = 13.sp)
+                }
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = includeNumbers,
+                        onCheckedChange = { includeNumbers = it }
+                    )
+                    Text("Números (0-9)", fontSize = 13.sp)
+                }
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = includeSymbols,
+                        onCheckedChange = { includeSymbols = it }
+                    )
+                    Text("Símbolos (!@#$%)", fontSize = 13.sp)
+                }
+                
+                Spacer(Modifier.height(12.dp))
+                
+                // Botones
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            generatedPassword = PasswordGenerator.generate(
+                                length = length,
+                                includeUppercase = includeUppercase,
+                                includeDigits = includeNumbers,
+                                includeSpecial = includeSymbols
+                            )
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("🔄 Regenerar")
+                    }
+                    
+                    Button(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                            val clip = android.content.ClipData.newPlainText("Contraseña", generatedPassword)
+                            clipboard.setPrimaryClip(clip)
+                            copied = true
+                            android.widget.Toast.makeText(
+                                context,
+                                "✅ Contraseña copiada (se borrará en 30s)",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                            
+                            // Auto-borrado después de 30s
+                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
+                            }, 30000)
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (copied) Color(0xFF22C55E) else Color(0xFF3B82F6)
+                        )
+                    ) {
+                        Text(if (copied) "✓ Copiado" else "📋 Copiar")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cerrar")
+            }
+        }
+    )
+}
+
+/**
+ * Pantalla de gestión de documentos seguros cifrados
+ */
+@Composable
+fun SecureDocumentsScreen(
+    context: Context,
+    onBack: () -> Unit
+) {
+    var documents by remember { mutableStateOf<List<com.guardianos.vault.data.FamilyDocument>>(emptyList()) }
+    var showAddDialog by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    
+    // Auto-logout
+    DisposableEffect(Unit) {
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val checkAutoLogout = object : Runnable {
+            override fun run() {
+                if (VaultSecurityManager.shouldAutoLogout(context)) {
+                    android.widget.Toast.makeText(
+                        context,
+                        "⏱️ Sesión cerrada por inactividad",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                    onBack()
+                } else {
+                    handler.postDelayed(this, 5000)
+                }
+            }
+        }
+        handler.post(checkAutoLogout)
+        
+        onDispose {
+            handler.removeCallbacks(checkAutoLogout)
+        }
+    }
+    
+    // Cargar documentos
+    LaunchedEffect(Unit) {
+        VaultSecurityManager.updateLastAccess(context)
+        scope.launch {
+            try {
+                documents = DocumentVault.loadDocuments(context)
+            } catch (e: Exception) {
+                error = e.message ?: "Error al cargar documentos"
+            }
+        }
+    }
+    
+    Box(
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            // Cabecera
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "Volver")
+                }
+                Text(
+                    "📄 Documentos Seguros",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        
+            Spacer(Modifier.height(16.dp))
+        
+            // Info
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "🔒 Almacenamiento cifrado AES-256",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "IDs, contratos, certificados médicos, documentos legales... Todo protegido con cifrado de nivel militar.",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        
+            Spacer(Modifier.height(16.dp))
+        
+            if (error.isNotEmpty()) {
+                Text(error, color = Color.Red, fontSize = 13.sp)
+                Spacer(Modifier.height(8.dp))
+            }
+        
+            // Lista de documentos
+            if (documents.isEmpty()) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        "📄",
+                        fontSize = 64.sp
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "No hay documentos guardados",
+                        fontSize = 16.sp,
+                        color = Color.Gray
+                    )
+                    Text(
+                        "Toca el botón + para añadir tu primer documento",
+                        fontSize = 13.sp,
+                        color = Color.Gray,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(documents) { document ->
+                        DocumentCard(
+                            context = context,
+                            document = document,
+                            onDelete = {
+                                scope.launch {
+                                    DocumentVault.deleteDocument(context, document)
+                                    try {
+                                        documents = DocumentVault.loadDocuments(context)
+                                    } catch (e: Exception) {
+                                        error = e.message ?: "Error"
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        
+        // Botón flotante para añadir documento
+        FloatingActionButton(
+            onClick = { showAddDialog = true },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp),
+            containerColor = MaterialTheme.colorScheme.primary
+        ) {
+            Icon(
+                Icons.Default.Add,
+                contentDescription = "Añadir documento",
+                tint = Color.White
+            )
+        }
+    }
+    
+    if (showAddDialog) {
+        AddDocumentDialog(
+            context = context,
+            onDismiss = { showAddDialog = false },
+            onSaved = {
+                scope.launch {
+                    try {
+                        documents = DocumentVault.loadDocuments(context)
+                    } catch (e: Exception) {
+                        error = e.message ?: "Error"
+                    }
+                }
+                showAddDialog = false
+            }
+        )
+    }
+}
+
+/**
+ * Tarjeta de documento seguro
+ */
+@Composable
+fun DocumentCard(
+    context: Context,
+    document: com.guardianos.vault.data.FamilyDocument,
+    onDelete: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded },
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF1A2332))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "${getDocumentIcon(document.type.name)} ${document.name}",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        document.type.name,
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                }
+                
+                Text(
+                    document.ownerRole.name,
+                    fontSize = 11.sp,
+                    color = Color(0xFF3B82F6),
+                    modifier = Modifier
+                        .background(
+                            Color(0xFF3B82F6).copy(alpha = 0.2f),
+                            RoundedCornerShape(4.dp)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+            
+            if (expanded) {
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(12.dp))
+                
+                Text(
+                    "Creado: ${SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(java.util.Date.from(document.createdAt))}",
+                    fontSize = 11.sp,
+                    color = Color.Gray
+                )
+                
+                Spacer(Modifier.height(12.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                val bytes = withContext(Dispatchers.IO) {
+                                    DocumentVault.loadDocumentFile(context, document)
+                                }
+                                
+                                if (bytes != null) {
+                                    try {
+                                        // Guardar temporalmente para abrir
+                                        val tempFile = java.io.File(context.cacheDir, document.name)
+                                        tempFile.writeBytes(bytes)
+                                        
+                                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                                            context,
+                                            "${context.packageName}.fileprovider",
+                                            tempFile
+                                        )
+                                        
+                                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                                            setDataAndType(uri, context.contentResolver.getType(uri))
+                                            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                        }
+                                        
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "No hay app para abrir este archivo",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                } else {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "Error al cargar documento",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("👁️ Ver")
+                    }
+                    
+                    TextButton(
+                        onClick = onDelete,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
+                    ) {
+                        Text("🗑️ Eliminar")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Helper para iconos de documentos
+ */
+private fun getDocumentIcon(type: String): String {
+    return when (type.lowercase()) {
+        "dni", "pasaporte", "identificación" -> "🆔"
+        "médico", "salud" -> "🏥"
+        "legal", "contrato" -> "⚖️"
+        "educación", "certificado" -> "🎓"
+        "financiero", "factura" -> "💰"
+        else -> "📄"
+    }
 }
