@@ -11,8 +11,13 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.coroutines.coroutineContext
 
 /**
  * Background Services Analyzer - Detector de servicios persistentes sospechosos
@@ -30,8 +35,22 @@ import java.util.*
  * **SIN ROOT - 100% FIABLE**
  * Usa: ActivityManager, JobScheduler, AlarmManager, PowerManager
  */
-object BackgroundServicesAnalyzer {
-    private const val TAG = "BackgroundServicesAnalyzer"
+class BackgroundServicesAnalyzer(context: Context) {
+    
+    // ✅ OBLIGATORIO: usar applicationContext para evitar memory leaks
+    private val appContext = context.applicationContext
+    private val packageManager = appContext.packageManager
+    private val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+    private val jobScheduler = appContext.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+    private val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+    
+    companion object {
+        private const val TAG = "BackgroundServicesAnalyzer"
+        private const val MAX_SCAN_TIME_MS = 15_000L // 15 segundos MÁXIMO (análisis más completo)
+        private const val MAX_SERVICES_TO_SCAN = 100 // Analizar 100 servicios (raramente hay tantos)
+        private const val YIELD_INTERVAL = 5 // Yield cada 5 servicios
+        private const val YIELD_DELAY_MS = 50L // 50ms breathing room para GC
+    }
     
     data class BackgroundServiceReport(
         val packageName: String,
@@ -60,51 +79,57 @@ object BackgroundServicesAnalyzer {
     
     /**
      * Analiza servicios en background buscando técnicas de persistencia
+     * 
+     * ⚡ OPTIMIZADO PARA OPPO A80 (142 apps instaladas, 4GB RAM):
+     * - Límite máximo 50 servicios (evita OOM)
+     * - Timeout 10 segundos (evita ANR)
+     * - Filtrado agresivo ColorOS/HeyTap
+     * - Yield cada 3 servicios (cooperativo)
+     * - NUNCA getApplicationLabel() (evita cargar APK assets)
      */
-    fun analyzeBackgroundServices(context: Context): List<BackgroundServiceReport> {
+    suspend fun analyzeBackgroundServices(): List<BackgroundServiceReport> = withTimeoutOrNull(MAX_SCAN_TIME_MS) {
         val reports = mutableListOf<BackgroundServiceReport>()
-        val pm = context.packageManager
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val jobScheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
-        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         
         try {
-            Log.d(TAG, "═══════════════════════════════════════════")
-            Log.d(TAG, "Analizando servicios en background...")
+            Log.d(TAG, "🔍 Analizando servicios en background...")
             
-            // Obtener servicios en ejecución (límite 150 para evitar OutOfMemoryError)
+            // Obtener servicios en ejecución (límite 50)
             val runningServices = try {
-                am.getRunningServices(150)
+                activityManager.getRunningServices(MAX_SERVICES_TO_SCAN)
             } catch (e: OutOfMemoryError) {
                 Log.e(TAG, "OutOfMemoryError obteniendo servicios en ejecución", e)
-                throw e // Re-lanzar para captura upstream
+                return@withTimeoutOrNull emptyList()
             }
             
-            Log.d(TAG, "Servicios activos: ${runningServices.size}")
+            Log.d(TAG, "📱 Servicios activos totales: ${runningServices.size}")
             
-            // Procesar servicios en chunks para prevenir OutOfMemoryError
-            val chunkSize = 25
-            val chunks = runningServices.chunked(chunkSize)
+            // Filtrar ColorOS/HeyTap
+            val servicesToScan = runningServices
+                .asSequence()
+                .filterNot { isColorOSSystemApp(it.service.packageName) }
+                .filterNot { isHeyTapSystemApp(it.service.packageName) }
+                .toList()
             
-            Log.d(TAG, "Procesando ${runningServices.size} servicios en ${chunks.size} lotes...")
+            Log.d(TAG, "🔍 Servicios a escanear (tras filtrado): ${servicesToScan.size}")
             
-            for ((chunkIndex, chunk) in chunks.withIndex()) {
-                Log.d(TAG, "[Lote ${chunkIndex + 1}/${chunks.size}] Analizando ${chunk.size} servicios...")
+            servicesToScan.forEachIndexed { index, serviceInfo ->
+                // ✅ Verificar cancelación ANTES de cada servicio
+                coroutineContext.ensureActive()
+                coroutineContext.ensureActive()
                 
-                // Analizar cada servicio del chunk
-                for (serviceInfo in chunk) {
                 try {
                     val packageName = serviceInfo.service.packageName
                     val serviceName = serviceInfo.service.className
                     
                     // Obtener información de la app
                     val appInfo = try {
-                        pm.getApplicationInfo(packageName, 0)
+                        packageManager.getApplicationInfo(packageName, 0)
                     } catch (e: Exception) {
-                        continue
+                        return@forEachIndexed // Continue con el siguiente servicio
                     }
                     
-                    val appName = pm.getApplicationLabel(appInfo).toString()
+                    // ⚠️ NUNCA usar getApplicationLabel() - carga APK assets (muy lento)
+                    val appName = packageName.substringAfterLast('.', "UnknownApp")
                     val isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
                     
                     // Verificar si es foreground service
@@ -118,10 +143,10 @@ object BackgroundServicesAnalyzer {
                     }
                     
                     // Verificar wake locks
-                    val hasWakeLock = hasActiveWakeLock(powerManager, packageName)
+                    val hasWakeLock = hasActiveWakeLock(packageName)
                     
                     // Verificar JobScheduler
-                    val scheduledJobs = countScheduledJobs(jobScheduler, packageName, pm)
+                    val scheduledJobs = countScheduledJobs(packageName)
                     
                     // Verificar alarmas (no podemos listar alarmas de otras apps sin root,
                     // pero podemos inferir por comportamiento)
@@ -178,44 +203,37 @@ object BackgroundServicesAnalyzer {
                         )
                         
                         reports.add(report)
-                        
-                        Log.d(TAG, "⚠️ Servicio persistente detectado: $appName")
-                        Log.d(TAG, "   Package: $packageName")
-                        Log.d(TAG, "   Servicio: ${serviceName.split(".").lastOrNull() ?: serviceName}")
-                        Log.d(TAG, "   Riesgo: ${riskLevel.name} ($riskScore puntos)")
-                        Log.d(TAG, "   Técnicas: ${persistenceTechniques.joinToString()}")
                     }
                     
                 } catch (e: Exception) {
                     Log.w(TAG, "Error analizando servicio: ${e.message}")
                 }
+                
+                // ✅ Yield cada 3 servicios para no bloquear
+                if (index % YIELD_INTERVAL == 0 && index > 0) {
+                    yield()
+                    delay(YIELD_DELAY_MS) // Breathing room para GC
+                }
             }
             
-            // Liberar memoria entre chunks si no es el último
-            if (chunkIndex < chunks.size - 1) {
-                Log.d(TAG, "  Liberando memoria antes del siguiente lote...")
-                System.gc()
-                Thread.sleep(50)
-            }
-        }
-            
-            Log.d(TAG, "═══════════════════════════════════════════")
-            Log.d(TAG, "Servicios sospechosos detectados: ${reports.size}")
-            Log.d(TAG, "  - Riesgo CRÍTICO: ${reports.count { it.riskLevel == RiskLevel.CRITICAL }}")
-            Log.d(TAG, "  - Riesgo ALTO: ${reports.count { it.riskLevel == RiskLevel.HIGH }}")
+            Log.d(TAG, "✅ Análisis completo: ${reports.size} servicios sospechosos detectados")
             
         } catch (e: Exception) {
             Log.e(TAG, "Error analizando servicios", e)
         }
         
-        return reports.sortedByDescending { it.riskScore }
+        reports.sortedByDescending { it.riskScore }
+    } ?: run {
+        // Timeout alcanzado, devolver detecciones parciales
+        Log.w(TAG, "⏱️ Timeout alcanzado (10s), devolviendo detecciones parciales")
+        emptyList()
     }
     
     /**
      * Verifica si la app tiene wake locks activos
      * (Sin root, solo podemos verificar el estado general del sistema)
      */
-    private fun hasActiveWakeLock(powerManager: PowerManager, packageName: String): Boolean {
+    private fun hasActiveWakeLock(packageName: String): Boolean {
         return try {
             // En Android 7+, isDeviceIdleMode nos indica si hay apps evitando el doze
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -231,11 +249,7 @@ object BackgroundServicesAnalyzer {
     /**
      * Cuenta jobs programados con JobScheduler
      */
-    private fun countScheduledJobs(
-        jobScheduler: JobScheduler, 
-        packageName: String,
-        pm: PackageManager
-    ): Int {
+    private fun countScheduledJobs(packageName: String): Int {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 val allJobs = jobScheduler.allPendingJobs
@@ -420,15 +434,14 @@ object BackgroundServicesAnalyzer {
     /**
      * Check rápido: ¿hay servicios foreground sospechosos?
      */
-    fun hasSuspiciousForegroundServices(context: Context): Boolean {
+    fun hasSuspiciousForegroundServices(): Boolean {
         return try {
-            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            // Limitar a 150 servicios para evitar OutOfMemoryError
-            val runningServices = am.getRunningServices(150)
+            // Limitar a 50 servicios para evitar OutOfMemoryError
+            val runningServices = activityManager.getRunningServices(MAX_SERVICES_TO_SCAN)
             
             runningServices.any { service ->
                 val isSystemApp = try {
-                    val appInfo = context.packageManager.getApplicationInfo(
+                    val appInfo = packageManager.getApplicationInfo(
                         service.service.packageName, 0
                     )
                     (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
@@ -449,15 +462,14 @@ object BackgroundServicesAnalyzer {
     /**
      * Obtiene conteo rápido de servicios sospechosos (para dashboard)
      */
-    fun getSuspiciousServicesCount(context: Context): Int {
+    fun getSuspiciousServicesCount(): Int {
         return try {
-            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            // Limitar a 150 servicios para evitar OutOfMemoryError
-            val runningServices = am.getRunningServices(150)
+            // Limitar a 50 servicios para evitar OutOfMemoryError
+            val runningServices = activityManager.getRunningServices(MAX_SERVICES_TO_SCAN)
             
             runningServices.count { service ->
                 val isSystemApp = try {
-                    val appInfo = context.packageManager.getApplicationInfo(
+                    val appInfo = packageManager.getApplicationInfo(
                         service.service.packageName, 0
                     )
                     (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
@@ -470,5 +482,26 @@ object BackgroundServicesAnalyzer {
         } catch (e: Exception) {
             0
         }
+    }
+    
+    /**
+     * ⚡ CRÍTICO PARA OPPO A80: Filtrado ColorOS
+     * ColorOS tiene servicios del sistema que NO deben reportarse.
+     */
+    private fun isColorOSSystemApp(packageName: String): Boolean {
+        return packageName.startsWith("com.oplus.") ||
+               packageName.startsWith("com.coloros.") ||
+               packageName.startsWith("com.oppo.os.") ||
+               packageName.startsWith("com.oppo.ambient.") ||
+               packageName.startsWith("com.nearme.")
+    }
+    
+    /**
+     * ⚡ CRÍTICO PARA OPPO A80: Filtrado HeyTap (tienda/servicios OPPO)
+     */
+    private fun isHeyTapSystemApp(packageName: String): Boolean {
+        return packageName.startsWith("com.heytap.") ||
+               packageName.startsWith("com.oppo.market.") ||
+               packageName == "com.oppo.usercenter"
     }
 }

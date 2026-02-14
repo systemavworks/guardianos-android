@@ -20,6 +20,8 @@ import java.net.InetAddress
  */
 class NetworkGuardian(private val context: Context) {
     
+    private val TAG = "NetworkGuardian"
+    
     data class NetworkConnection(
         val appName: String,
         val packageName: String,
@@ -53,25 +55,235 @@ class NetworkGuardian(private val context: Context) {
     )
     
     /**
+     * Información detallada sobre la red WiFi actual.
+     */
+    data class WifiNetworkInfo(
+        val ssid: String,
+        val bssid: String,
+        val securityType: String,        // WPA3, WPA2, WEP, OPEN
+        val signalStrength: Int,         // dBm
+        val frequency: Int,              // MHz (2.4GHz/5GHz)
+        val channel: Int,
+        val linkSpeed: Int,              // Mbps
+        val ipAddress: String,
+        val gateway: String,
+        val dns: List<String>,
+        val isSecure: Boolean,
+        val securityLevel: String,       // SEGURA, ACEPTABLE, INSEGURA, PELIGROSA
+        val vulnerabilities: List<String>,
+        val recommendations: List<String>
+    )
+    
+    /**
+     * Obtiene información completa sobre la red WiFi actual.
+     * Incluye análisis de seguridad, cifrado y recomendaciones.
+     */
+    @android.annotation.SuppressLint("MissingPermission")
+    fun getCurrentWifiInfo(): WifiNetworkInfo? {
+        val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+            ?: return null
+        
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = connectivityManager.activeNetwork ?: return null
+        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return null
+        
+        // Verificar que es WiFi
+        if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            android.util.Log.d(TAG, "No hay conexión WiFi activa")
+            return null
+        }
+        
+        val connectionInfo = wifiManager.connectionInfo
+        val dhcpInfo = wifiManager.dhcpInfo
+        
+        // SSID (remover comillas)
+        val ssid = connectionInfo.ssid.replace("\"", "")
+        if (ssid == "<unknown ssid>") {
+            android.util.Log.w(TAG, "SSID desconocido - permisos insuficientes")
+            return null
+        }
+        
+        // BSSID (dirección MAC del router)
+        val bssid = connectionInfo.bssid ?: "Desconocido"
+        
+        // Fuerza de señal (dBm)
+        val rssi = connectionInfo.rssi
+        
+        // Velocidad de enlace (Mbps)
+        val linkSpeed = connectionInfo.linkSpeed
+        
+        // Frecuencia (MHz) - 2.4GHz o 5GHz
+        val frequency = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            connectionInfo.frequency
+        } else {
+            0
+        }
+        
+        // Canal WiFi aproximado
+        val channel = when {
+            frequency in 2412..2484 -> (frequency - 2412) / 5 + 1  // Canales 1-13 (2.4GHz)
+            frequency in 5170..5825 -> (frequency - 5170) / 5 + 34 // Canales 5GHz
+            else -> 0
+        }
+        
+        // IP local
+        val ipAddress = android.text.format.Formatter.formatIpAddress(connectionInfo.ipAddress)
+        
+        // Gateway (router)
+        val gateway = android.text.format.Formatter.formatIpAddress(dhcpInfo.gateway)
+        
+        // DNS
+        val dns1 = android.text.format.Formatter.formatIpAddress(dhcpInfo.dns1)
+        val dns2 = android.text.format.Formatter.formatIpAddress(dhcpInfo.dns2)
+        val dnsList = listOf(dns1, dns2).filter { it != "0.0.0.0" }
+        
+        // ✅ ANÁLISIS DE SEGURIDAD
+        val securityType = detectWifiSecurity(wifiManager, ssid)
+        val isSecure = securityType in listOf("WPA3", "WPA2")
+        
+        val vulnerabilities = mutableListOf<String>()
+        val recommendations = mutableListOf<String>()
+        
+        // Evaluar nivel de seguridad
+        val securityLevel = when (securityType) {
+            "WPA3" -> {
+                "SEGURA"
+            }
+            "WPA2" -> {
+                if (rssi > -70) {
+                    "SEGURA"
+                } else {
+                    vulnerabilities.add("Señal débil ($rssi dBm)")
+                    recommendations.add("Acércate al router para mejorar la velocidad")
+                    "ACEPTABLE"
+                }
+            }
+            "WPA" -> {
+                vulnerabilities.add("WPA es antiguo y vulnerable")
+                recommendations.add("Actualiza el router a WPA2 o WPA3")
+                "INSEGURA"
+            }
+            "WEP" -> {
+                vulnerabilities.add("⚠️ WEP es EXTREMADAMENTE inseguro (hack en 60 segundos)")
+                recommendations.add("🚨 CAMBIAR INMEDIATAMENTE a WPA2 o WPA3")
+                recommendations.add("No uses esta red para operaciones sensibles")
+                "PELIGROSA"
+            }
+            "OPEN" -> {
+                vulnerabilities.add("🚨 Red ABIERTA sin cifrado")
+                vulnerabilities.add("Cualquiera puede interceptar tu tráfico")
+                recommendations.add("🚨 NUNCA uses redes abiertas sin VPN")
+                recommendations.add("No accedas a bancos, correos o redes sociales")
+                "PELIGROSA"
+            }
+            else -> "DESCONOCIDA"
+        }
+        
+        // Análisis de canal (interferencias 2.4GHz)
+        if (frequency in 2412..2484) {
+            if (channel in 1..11) {
+                vulnerabilities.add("Canal $channel (2.4GHz) - posible interferencia con vecinos")
+                recommendations.add("Considera usar 5GHz si tu dispositivo lo soporta")
+            }
+        }
+        
+        // Análisis de DNS (seguridad)
+        if (dnsList.any { it.startsWith("8.8.") }) {
+            android.util.Log.d(TAG, "DNS de Google detectado (seguro)")
+        } else if (dnsList.any { it.startsWith("1.1.") }) {
+            android.util.Log.d(TAG, "DNS de Cloudflare detectado (seguro)")
+        } else {
+            recommendations.add("Considera usar DNS seguros (1.1.1.1 o 8.8.8.8)")
+        }
+        
+        // Recomendaciones generales
+        if (securityLevel == "SEGURA" && vulnerabilities.isEmpty()) {
+            recommendations.add("✅ Tu red es segura, continúa navegando con confianza")
+        }
+        
+        android.util.Log.d(TAG, "📡 Red WiFi: $ssid")
+        android.util.Log.d(TAG, "   Seguridad: $securityType ($securityLevel)")
+        android.util.Log.d(TAG, "   Señal: $rssi dBm")
+        android.util.Log.d(TAG, "   Frecuencia: ${frequency}MHz (Canal $channel)")
+        android.util.Log.d(TAG, "   Velocidad: ${linkSpeed}Mbps")
+        android.util.Log.d(TAG, "   IP: $ipAddress | Gateway: $gateway")
+        
+        return WifiNetworkInfo(
+            ssid = ssid,
+            bssid = bssid,
+            securityType = securityType,
+            signalStrength = rssi,
+            frequency = frequency,
+            channel = channel,
+            linkSpeed = linkSpeed,
+            ipAddress = ipAddress,
+            gateway = gateway,
+            dns = dnsList,
+            isSecure = isSecure,
+            securityLevel = securityLevel,
+            vulnerabilities = vulnerabilities,
+            recommendations = recommendations
+        )
+    }
+    
+    /**
+     * Detecta el tipo de seguridad WiFi actual.
+     */
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun detectWifiSecurity(wifiManager: android.net.wifi.WifiManager, currentSsid: String): String {
+        try {
+            val scanResults = wifiManager.scanResults
+            val currentNetwork = scanResults.find { 
+                it.SSID == currentSsid || "\"${it.SSID}\"" == currentSsid 
+            }
+            
+            if (currentNetwork != null) {
+                val capabilities = currentNetwork.capabilities
+                return when {
+                    capabilities.contains("WPA3") -> "WPA3"
+                    capabilities.contains("WPA2") -> "WPA2"
+                    capabilities.contains("WPA") -> "WPA"
+                    capabilities.contains("WEP") -> "WEP"
+                    capabilities.contains("ESS") && !capabilities.contains("WPA") -> "OPEN"
+                    else -> "Desconocido"
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "Error detectando seguridad WiFi", e)
+        }
+        
+        return "Desconocido"
+    }
+    
+    /**
      * Escanea conexiones activas del dispositivo.
      */
     fun scanActiveConnections(): List<NetworkConnection> {
         val connections = mutableListOf<NetworkConnection>()
         
+        android.util.Log.d(TAG, "🔍 Iniciando escaneo de red...")
+        
         try {
             // Leer /proc/net/tcp (IPv4)
             val tcp4Connections = parseProcNetFile("/proc/net/tcp")
             connections.addAll(tcp4Connections)
+            android.util.Log.d(TAG, "  IPv4: ${tcp4Connections.size} conexiones")
             
             // Leer /proc/net/tcp6 (IPv6)
             val tcp6Connections = parseProcNetFile("/proc/net/tcp6")
             connections.addAll(tcp6Connections)
+            android.util.Log.d(TAG, "  IPv6: ${tcp6Connections.size} conexiones")
             
         } catch (e: Exception) {
-            // Error al leer proc
+            android.util.Log.e(TAG, "Error al leer proc/net: ${e.message}")
         }
         
-        return connections.filter { it.state == ConnectionState.ESTABLISHED }
+        val established = connections.filter { it.state == ConnectionState.ESTABLISHED }
+        android.util.Log.d(TAG, "✅ Conexiones ESTABLISHED: ${established.size}")
+        android.util.Log.d(TAG, "  Apps únicas: ${established.map { it.packageName }.distinct().size}")
+        android.util.Log.d(TAG, "  Sospechosas: ${established.count { it.isSuspicious }}")
+        
+        return established
     }
     
     /**
@@ -200,8 +412,8 @@ class NetworkGuardian(private val context: Context) {
         
         return try {
             val packageName = packages[0]
-            val appInfo = pm.getApplicationInfo(packageName, 0)
-            val appName = pm.getApplicationLabel(appInfo).toString()
+            // ⚠️ NUNCA usar getApplicationLabel() - carga APK assets (muy lento)
+            val appName = packageName.substringAfterLast('.', packageName)
             appName to packageName
         } catch (e: Exception) {
             "Sistema" to "android"
@@ -304,10 +516,25 @@ class NetworkGuardian(private val context: Context) {
     )
     
     fun getNetworkStatistics(): NetworkStats {
+        android.util.Log.d(TAG, "📊 Generando estadísticas de red...")
         val connections = scanActiveConnections()
         val appCounts = connections.groupBy { it.appName }.mapValues { it.value.size }
         val topApps = appCounts.toList().sortedByDescending { it.second }.take(5)
         val suspiciousIPs = connections.filter { it.isSuspicious }.map { it.remoteAddress }.distinct()
+        
+        android.util.Log.d(TAG, "  Top apps con conexiones:")
+        topApps.forEach { (app, count) ->
+            android.util.Log.d(TAG, "    - $app: $count conexiones")
+        }
+        
+        if (suspiciousIPs.isNotEmpty()) {
+            android.util.Log.w(TAG, "⚠️ IPs sospechosas detectadas: ${suspiciousIPs.size}")
+            suspiciousIPs.forEach { ip ->
+                android.util.Log.w(TAG, "    - $ip")
+            }
+        } else {
+            android.util.Log.d(TAG, "✅ No se detectaron IPs sospechosas")
+        }
         
         return NetworkStats(
             totalConnections = connections.size,

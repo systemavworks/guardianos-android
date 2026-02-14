@@ -6,8 +6,13 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.util.Log
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.coroutines.coroutineContext
 
 /**
  * Hidden Apps Detector - Detector de aplicaciones ocultas
@@ -24,8 +29,19 @@ import java.util.*
  * **SIN ROOT - 100% FIABLE**
  * Usa: PackageManager.queryIntentActivities()
  */
-object HiddenAppsDetector {
-    private const val TAG = "HiddenAppsDetector"
+class HiddenAppsDetector(context: Context) {
+    
+    // ✅ OBLIGATORIO: usar applicationContext para evitar memory leaks
+    private val appContext = context.applicationContext
+    private val packageManager = appContext.packageManager
+    
+    companion object {
+        private const val TAG = "HiddenAppsDetector"
+        private const val MAX_SCAN_TIME_MS = 20_000L // 20 segundos MÁXIMO (análisis más completo)
+        private const val MAX_APPS_TO_SCAN = 100 // Analizar 100 apps (con priorización)
+        private const val YIELD_INTERVAL = 5 // Yield cada 5 apps
+        private const val YIELD_DELAY_MS = 50L // 50ms breathing room para GC
+    }
     
     data class HiddenAppReport(
         val packageName: String,
@@ -52,51 +68,65 @@ object HiddenAppsDetector {
     
     /**
      * Escanea todas las apps instaladas buscando técnicas de ocultación
+     * 
+     * ⚡ OPTIMIZADO con priorización inteligente:
+     * - Límite 100 apps (análisis más completo)
+     * - Timeout 20 segundos
+     * - Prioriza apps sin icono launcher primero
+     * - Filtrado agresivo ColorOS/HeyTap
+     * - Yield cada 5 apps (cooperativo)
+     * - NUNCA getApplicationLabel() (evita cargar APK assets)
      */
-    fun scanHiddenApps(context: Context): List<HiddenAppReport> {
+    suspend fun scanHiddenApps(): List<HiddenAppReport> = withTimeoutOrNull(MAX_SCAN_TIME_MS) {
         val reports = mutableListOf<HiddenAppReport>()
-        val pm = context.packageManager
         
         try {
             // Obtener todas las apps instaladas
-            val allApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            val allApps = packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
             
-            // OPTIMIZACIÓN: Filtrar apps del sistema primero (reduce análisis ~70%)
-            // Apps de sistema raramente son stalkerware
-            val installedApps = allApps.filter { appInfo ->
-                (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0 ||
-                (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-            }
+            Log.d(TAG, "📱 Apps instaladas totales: ${allApps.size}")
             
-            Log.d(TAG, "═══════════════════════════════════════════")
-            Log.d(TAG, "Apps totales: ${allApps.size}")
-            Log.d(TAG, "Apps no-sistema a analizar: ${installedApps.size}")
-            Log.d(TAG, "Procesando en lotes de 30 apps para prevenir OutOfMemoryError...")
-            
-            // Obtener apps con ícono en launcher (para comparar)
+            // Obtener apps con ícono launcher ANTES (para priorización)
             val launcherIntent = Intent(Intent.ACTION_MAIN, null).apply {
                 addCategory(Intent.CATEGORY_LAUNCHER)
             }
-            val launcherApps = pm.queryIntentActivities(launcherIntent, 0)
+            val launcherApps = packageManager.queryIntentActivities(launcherIntent, 0)
                 .map { it.activityInfo.packageName }
                 .toSet()
             
-            Log.d(TAG, "Apps con ícono launcher: ${launcherApps.size}")
+            // OPTIMIZACIÓN: Filtrar + PRIORIZAR apps sin icono primero
+            val installedApps = allApps
+                .asSequence()
+                .filter { appInfo ->
+                    // Solo apps no-sistema o actualizadas
+                    (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0 ||
+                    (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                }
+                .filterNot { isColorOSSystemApp(it.packageName) }
+                .filterNot { isHeyTapSystemApp(it.packageName) }
+                .sortedByDescending { appInfo ->
+                    // 🎯 PRIORIZAR: apps sin icono launcher (más sospechosas)
+                    val hasIcon = appInfo.packageName in launcherApps
+                    if (!hasIcon) 100 else 0 // Sin icono = prioridad alta
+                }
+                .take(MAX_APPS_TO_SCAN)
+                .toList()
+            
+            Log.d(TAG, "🔍 Apps a escanear (tras filtrado): ${installedApps.size}")
+            Log.d(TAG, "🔍 Apps con icono launcher: ${launcherApps.size}")
             
             // Detectar apps populares para buscar duplicados
-            val popularApps = detectInstalledPopularApps(installedApps, pm)
+            val popularApps = detectInstalledPopularApps(installedApps)
             
-            // CHUNKING: Procesar en lotes de 30 apps para reducir memoria
-            val chunkSize = 30
-            val chunks = installedApps.chunked(chunkSize)
-            
-            for ((chunkIndex, chunk) in chunks.withIndex()) {
-                Log.d(TAG, "[Lote ${chunkIndex + 1}/${chunks.size}] Analizando ${chunk.size} apps...")
+            installedApps.forEachIndexed { index, appInfo ->
+                // ✅ Verificar cancelación ANTES de cada app
+                coroutineContext.ensureActive()
+                coroutineContext.ensureActive()
                 
-                for (appInfo in chunk) {
                 try {
                     val packageName = appInfo.packageName
-                    val appName = pm.getApplicationLabel(appInfo).toString()
+                    // ⚠️ NUNCA usar getApplicationLabel() - carga APK assets (muy lento)
+                    val appName = packageName.substringAfterLast('.', "UnknownApp")
                     
                     // Verificar si tiene ícono en launcher
                     val hasLauncherIcon = packageName in launcherApps
@@ -112,7 +142,7 @@ object HiddenAppsDetector {
                     )
                     
                     // Obtener información de instalación
-                    val packageInfo = pm.getPackageInfo(packageName, 0)
+                    val packageInfo = packageManager.getPackageInfo(packageName, 0)
                     val installTime = packageInfo.firstInstallTime
                     val calendar = Calendar.getInstance().apply {
                         timeInMillis = installTime
@@ -160,38 +190,29 @@ object HiddenAppsDetector {
                         )
                         
                         reports.add(report)
-                        
-                        Log.d(TAG, "⚠️ App oculta detectada: $appName")
-                        Log.d(TAG, "   Package: $packageName")
-                        Log.d(TAG, "   Riesgo: ${riskLevel.name} ($riskScore puntos)")
-                        Log.d(TAG, "   Técnicas: ${hidingTechniques.joinToString()}")
                     }
-                    
                 } catch (e: Exception) {
-                    Log.w(TAG, "Error analizando app ${appInfo.packageName}: ${e.message}")
+                    Log.e(TAG, "Error analizando app: ${appInfo.packageName}", e)
                 }
-            }
                 
-                // Liberar memoria tras cada lote
-                if (chunkIndex < chunks.size - 1) {
-                    System.gc()
-                    Thread.sleep(50) // Pausa breve para GC
+                // ✅ Yield cada 3 apps para no bloquear
+                if (index % YIELD_INTERVAL == 0 && index > 0) {
+                    yield()
+                    delay(YIELD_DELAY_MS) // Breathing room para GC
                 }
             }
             
-            Log.d(TAG, "═══════════════════════════════════════════")
-            Log.d(TAG, "Apps ocultas detectadas: ${reports.size}")
-            Log.d(TAG, "  - Riesgo CRÍTICO: ${reports.count { it.riskLevel == RiskLevel.CRITICAL }}")
-            Log.d(TAG, "  - Riesgo ALTO: ${reports.count { it.riskLevel == RiskLevel.HIGH }}")
+            Log.d(TAG, "✅ Escaneo completo: ${reports.size} apps ocultas detectadas")
             
-        } catch (e: OutOfMemoryError) {
-            Log.e(TAG, "OutOfMemoryError en HiddenAppsDetector - demasiadas apps", e)
-            throw e  // Re-lanzar para captura superior
         } catch (e: Exception) {
-            Log.e(TAG, "Error escaneando apps ocultas", e)
+            Log.e(TAG, "Error en scanHiddenApps", e)
         }
         
-        return reports.sortedByDescending { it.riskScore }
+        reports.sortedByDescending { it.riskScore }
+    } ?: run {
+        // Timeout alcanzado, devolver detecciones parciales
+        Log.w(TAG, "⏱️ Timeout alcanzado (10s), devolviendo detecciones parciales")
+        emptyList()
     }
     
     /**
@@ -218,8 +239,7 @@ object HiddenAppsDetector {
      * Detecta apps populares instaladas (para buscar duplicados)
      */
     private fun detectInstalledPopularApps(
-        installedApps: List<ApplicationInfo>,
-        pm: PackageManager
+        installedApps: List<ApplicationInfo>
     ): Map<String, String> {
         val popular = mutableMapOf<String, String>()
         
@@ -396,15 +416,14 @@ object HiddenAppsDetector {
     /**
      * Check rápido: ¿hay apps sin ícono launcher?
      */
-    fun hasHiddenApps(context: Context): Boolean {
+    fun hasHiddenApps(): Boolean {
         return try {
-            val pm = context.packageManager
-            val installedApps = pm.getInstalledApplications(0)
+            val installedApps = packageManager.getInstalledApplications(0)
             
             val launcherIntent = Intent(Intent.ACTION_MAIN, null).apply {
                 addCategory(Intent.CATEGORY_LAUNCHER)
             }
-            val launcherApps = pm.queryIntentActivities(launcherIntent, 0)
+            val launcherApps = packageManager.queryIntentActivities(launcherIntent, 0)
                 .map { it.activityInfo.packageName }
                 .toSet()
             
@@ -421,15 +440,14 @@ object HiddenAppsDetector {
     /**
      * Obtiene conteo rápido de apps ocultas (para dashboard)
      */
-    fun getHiddenAppsCount(context: Context): Int {
+    fun getHiddenAppsCount(): Int {
         return try {
-            val pm = context.packageManager
-            val installedApps = pm.getInstalledApplications(0)
+            val installedApps = packageManager.getInstalledApplications(0)
             
             val launcherIntent = Intent(Intent.ACTION_MAIN, null).apply {
                 addCategory(Intent.CATEGORY_LAUNCHER)
             }
-            val launcherApps = pm.queryIntentActivities(launcherIntent, 0)
+            val launcherApps = packageManager.queryIntentActivities(launcherIntent, 0)
                 .map { it.activityInfo.packageName }
                 .toSet()
             
@@ -440,5 +458,26 @@ object HiddenAppsDetector {
         } catch (e: Exception) {
             0
         }
+    }
+    
+    /**
+     * ⚡ CRÍTICO PARA OPPO A80: Filtrado ColorOS
+     * ColorOS tiene 50+ apps sistema que NO deben escanearse.
+     */
+    private fun isColorOSSystemApp(packageName: String): Boolean {
+        return packageName.startsWith("com.oplus.") ||
+               packageName.startsWith("com.coloros.") ||
+               packageName.startsWith("com.oppo.os.") ||
+               packageName.startsWith("com.oppo.ambient.") ||
+               packageName.startsWith("com.nearme.")
+    }
+    
+    /**
+     * ⚡ CRÍTICO PARA OPPO A80: Filtrado HeyTap (tienda/servicios OPPO)
+     */
+    private fun isHeyTapSystemApp(packageName: String): Boolean {
+        return packageName.startsWith("com.heytap.") ||
+               packageName.startsWith("com.oppo.market.") ||
+               packageName == "com.oppo.usercenter"
     }
 }

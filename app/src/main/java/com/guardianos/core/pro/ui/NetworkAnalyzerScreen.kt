@@ -28,12 +28,16 @@ import java.util.*
 fun NetworkAnalyzerScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var devices by remember { mutableStateOf<List<NetworkScanner.NetworkDevice>>(emptyList()) }
+    var wifiInfo by remember { mutableStateOf<com.guardianos.core.network.NetworkGuardian.WifiNetworkInfo?>(null) }
     var isScanning by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     
     // Cargar dispositivos conocidos al inicio
     LaunchedEffect(Unit) {
         NetworkScanner.loadKnownDevices(context)
+        // Obtener información WiFi actual
+        val guardian = com.guardianos.core.network.NetworkGuardian(context)
+        wifiInfo = guardian.getCurrentWifiInfo()
         // Escanear automáticamente al abrir
         isScanning = true
         devices = withContext(Dispatchers.IO) {
@@ -66,6 +70,8 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
                     onClick = {
                         scope.launch {
                             isScanning = true
+                            val guardian = com.guardianos.core.network.NetworkGuardian(context)
+                            wifiInfo = guardian.getCurrentWifiInfo()
                             devices = withContext(Dispatchers.IO) {
                                 NetworkScanner.scanLocalNetwork(context)
                             }
@@ -254,6 +260,181 @@ private fun NetworkStatisticsCard(devices: List<NetworkScanner.NetworkDevice>) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun WifiInformationCard(wifiInfo: com.guardianos.core.network.NetworkGuardian.WifiNetworkInfo) {
+    val securityColor = when (wifiInfo.securityLevel) {
+        "SEGURA" -> Color(0xFF10B981)
+        "ACEPTABLE" -> Color(0xFF10B981)
+        "INSEGURA" -> Color(0xFFFBBF24)
+        "PELIGROSA" -> Color(0xFFB3261E)
+        else -> Color.Gray
+    }
+    
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = securityColor.copy(alpha = 0.15f)
+        ),
+        border = BorderStroke(1.dp, securityColor)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "📡 Red WiFi Actual",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    color = securityColor
+                )
+                Surface(
+                    color = securityColor,
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Text(
+                        text = wifiInfo.securityLevel,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+            
+            Spacer(Modifier.height(12.dp))
+            Divider()
+            Spacer(Modifier.height(12.dp))
+            
+            // SSID y BSSID
+            InfoRow("Red", wifiInfo.ssid)
+            InfoRow("Router (BSSID)", wifiInfo.bssid)
+            
+            Spacer(Modifier.height(8.dp))
+            
+            // Seguridad
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Cifrado", fontSize = 11.sp, color = Color.Gray)
+                    Text(
+                        wifiInfo.securityType,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (wifiInfo.isSecure) Color(0xFF10B981) else Color(0xFFB3261E)
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Señal", fontSize = 11.sp, color = Color.Gray)
+                    val signalQuality = when {
+                        wifiInfo.signalStrength > -50 -> "Excelente"
+                        wifiInfo.signalStrength > -60 -> "Buena"
+                        wifiInfo.signalStrength > -70 -> "Media"
+                        else -> "Débil"
+                    }
+                    Text(
+                        "$signalQuality (${wifiInfo.signalStrength} dBm)",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+            
+            Spacer(Modifier.height(8.dp))
+            
+            // Frecuencia y velocidad
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Frecuencia", fontSize = 11.sp, color = Color.Gray)
+                    val band = if (wifiInfo.frequency > 5000) "5 GHz" else "2.4 GHz"
+                    Text(
+                        "$band (Canal ${wifiInfo.channel})",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Velocidad", fontSize = 11.sp, color = Color.Gray)
+                    Text(
+                        "${wifiInfo.linkSpeed} Mbps",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            
+            Spacer(Modifier.height(8.dp))
+            
+            // Red
+            InfoRow("IP Local", wifiInfo.ipAddress)
+            InfoRow("Gateway", wifiInfo.gateway)
+            if (wifiInfo.dns.isNotEmpty()) {
+                InfoRow("DNS", wifiInfo.dns.joinToString(", "))
+            }
+            
+            // Vulnerabilidades
+            if (wifiInfo.vulnerabilities.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "⚠️ Vulnerabilidades detectadas:",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFB3261E)
+                )
+                wifiInfo.vulnerabilities.forEach { vuln ->
+                    Text(
+                        text = "• $vuln",
+                        fontSize = 11.sp,
+                        color = Color(0xFFB3261E),
+                        modifier = Modifier.padding(start = 8.dp, top = 4.dp)
+                    )
+                }
+            }
+            
+            // Recomendaciones
+            if (wifiInfo.recommendations.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "💡 Recomendaciones:",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = securityColor
+                )
+                wifiInfo.recommendations.forEach { rec ->
+                    Text(
+                        text = "• $rec",
+                        fontSize = 11.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(start = 8.dp, top = 4.dp),
+                        lineHeight = 14.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+    ) {
+        Text(
+            text = "$label:",
+            fontSize = 11.sp,
+            color = Color.Gray,
+            modifier = Modifier.width(100.dp)
+        )
+        Text(
+            text = value,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 

@@ -127,12 +127,17 @@ class AppAuditor(
                 // Sistema unificado con AccessibilityMonitor + HiddenAppsDetector + BackgroundServicesAnalyzer
                 if (mode == AuditMode.FULL) {
                     try {
+                        // Crear instancias de los detectores
+                        val accessibilityMonitor = AccessibilityMonitor(context)
+                        val hiddenAppsDetector = HiddenAppsDetector(context)
+                        val servicesAnalyzer = BackgroundServicesAnalyzer(context)
+                        
                         // Obtener reportes de los 3 detectores
-                        val accessibilityReports = AccessibilityMonitor.scanAccessibilityServices(context)
+                        val accessibilityReports = accessibilityMonitor.scanAccessibilityServices()
                             .associateBy { it.packageName }
-                        val hiddenAppReports = HiddenAppsDetector.scanHiddenApps(context)
+                        val hiddenAppReports = hiddenAppsDetector.scanHiddenApps()
                             .associateBy { it.packageName }
-                        val serviceReports = BackgroundServicesAnalyzer.analyzeBackgroundServices(context)
+                        val serviceReports = servicesAnalyzer.analyzeBackgroundServices()
                             .associateBy { it.packageName }
                         
                         // Calcular score stalkerware para esta app

@@ -22,8 +22,14 @@ import android.view.accessibility.AccessibilityManager
  * **SIN ROOT - 100% LOCAL**
  * Usa: AccessibilityManager.getEnabledAccessibilityServiceList()
  */
-object AccessibilityMonitor {
-    private const val TAG = "AccessibilityMonitor"
+class AccessibilityMonitor(context: Context) {
+    
+    // ✅ OBLIGATORIO: usar applicationContext para evitar memory leaks
+    private val appContext = context.applicationContext
+    
+    companion object {
+        private const val TAG = "AccessibilityMonitor"
+    }
     
     data class AccessibilityServiceReport(
         val packageName: String,
@@ -50,12 +56,15 @@ object AccessibilityMonitor {
     
     /**
      * Escanea todos los servicios de accesibilidad activos en el dispositivo
+     * 
+     * ⚡ OPTIMIZADO: Servicios de accesibilidad son muy pocos (~3-5 típicamente)
+     * No necesita límites ni timeouts como otros scanners.
      */
-    fun scanAccessibilityServices(context: Context): List<AccessibilityServiceReport> {
+    fun scanAccessibilityServices(): List<AccessibilityServiceReport> {
         val reports = mutableListOf<AccessibilityServiceReport>()
         
         try {
-            val accessibilityManager = context.getSystemService(Context.ACCESSIBILITY_SERVICE) 
+            val accessibilityManager = appContext.getSystemService(Context.ACCESSIBILITY_SERVICE) 
                 as? AccessibilityManager ?: return emptyList()
             
             // Obtener servicios activos
@@ -63,18 +72,25 @@ object AccessibilityMonitor {
                 AccessibilityServiceInfo.FEEDBACK_ALL_MASK
             )
             
-            Log.d(TAG, "═══════════════════════════════════════════")
-            Log.d(TAG, "Servicios de accesibilidad activos: ${enabledServices.size}")
+            Log.d(TAG, "🔍 Servicios de accesibilidad activos: ${enabledServices.size}")
             
             for (serviceInfo in enabledServices) {
                 try {
                     val packageName = serviceInfo.resolveInfo.serviceInfo.packageName
+                    
+                    // ⚡ Skip ColorOS/HeyTap (sistema legítimo)
+                    if (isColorOSSystemApp(packageName) || isHeyTapSystemApp(packageName)) {
+                        Log.d(TAG, "  Skipping ColorOS/HeyTap: $packageName")
+                        continue
+                    }
+                    
                     val serviceName = serviceInfo.resolveInfo.serviceInfo.name
                     
                     // Obtener información de la app
-                    val pm = context.packageManager
+                    val pm = appContext.packageManager
                     val appInfo = pm.getApplicationInfo(packageName, 0)
-                    val appName = pm.getApplicationLabel(appInfo).toString()
+                    // ⚠️ NUNCA usar getApplicationLabel() - carga APK assets (muy lento)
+                    val appName = packageName.substringAfterLast('.', "UnknownApp")
                     
                     // Verificar si es app del sistema
                     val isSystemApp = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
@@ -120,20 +136,15 @@ object AccessibilityMonitor {
                     
                     reports.add(report)
                     
-                    Log.d(TAG, "✓ Servicio: $appName ($packageName)")
+                    Log.d(TAG, "✅ Servicio: $appName ($packageName)")
                     Log.d(TAG, "  - Riesgo: ${report.riskLevel.name} (${report.riskScore} puntos)")
-                    Log.d(TAG, "  - Capacidades: ${capabilities.size}")
-                    Log.d(TAG, "  - Whitelisted: $isWhitelisted")
                     
                 } catch (e: Exception) {
                     Log.w(TAG, "Error analizando servicio: ${e.message}")
                 }
             }
             
-            Log.d(TAG, "═══════════════════════════════════════════")
-            Log.d(TAG, "Análisis completado: ${reports.size} servicios")
-            Log.d(TAG, "  - Riesgo CRÍTICO: ${reports.count { it.riskLevel == RiskLevel.CRITICAL }}")
-            Log.d(TAG, "  - Riesgo ALTO: ${reports.count { it.riskLevel == RiskLevel.HIGH }}")
+            Log.d(TAG, "✅ Análisis completado: ${reports.size} servicios")
             
         } catch (e: Exception) {
             Log.e(TAG, "Error escaneando servicios de accesibilidad", e)
@@ -370,9 +381,9 @@ object AccessibilityMonitor {
     /**
      * Verifica si hay servicios de accesibilidad activos (check rápido)
      */
-    fun hasActiveAccessibilityServices(context: Context): Boolean {
+    fun hasActiveAccessibilityServices(): Boolean {
         return try {
-            val accessibilityManager = context.getSystemService(Context.ACCESSIBILITY_SERVICE) 
+            val accessibilityManager = appContext.getSystemService(Context.ACCESSIBILITY_SERVICE) 
                 as? AccessibilityManager
             
             val enabledServices = accessibilityManager?.getEnabledAccessibilityServiceList(
@@ -388,21 +399,18 @@ object AccessibilityMonitor {
     /**
      * Obtiene string con nombres de servicios activos (para logs/UI)
      */
-    fun getEnabledServiceNames(context: Context): List<String> {
+    fun getEnabledServiceNames(): List<String> {
         return try {
-            val accessibilityManager = context.getSystemService(Context.ACCESSIBILITY_SERVICE) 
+            val accessibilityManager = appContext.getSystemService(Context.ACCESSIBILITY_SERVICE) 
                 as? AccessibilityManager ?: return emptyList()
             
             accessibilityManager.getEnabledAccessibilityServiceList(
                 AccessibilityServiceInfo.FEEDBACK_ALL_MASK
             ).mapNotNull { service ->
                 try {
-                    val pm = context.packageManager
-                    val appInfo = pm.getApplicationInfo(
-                        service.resolveInfo.serviceInfo.packageName, 
-                        0
-                    )
-                    pm.getApplicationLabel(appInfo).toString()
+                    val packageName = service.resolveInfo.serviceInfo.packageName
+                    // ⚠️ NUNCA usar getApplicationLabel() - carga APK assets (muy lento)
+                    packageName.substringAfterLast('.', "UnknownApp")
                 } catch (e: Exception) {
                     null
                 }
@@ -410,5 +418,26 @@ object AccessibilityMonitor {
         } catch (e: Exception) {
             emptyList()
         }
+    }
+    
+    /**
+     * ⚡ CRÍTICO PARA OPPO A80: Filtrado ColorOS
+     * ColorOS tiene servicios de accesibilidad del sistema que NO deben reportarse.
+     */
+    private fun isColorOSSystemApp(packageName: String): Boolean {
+        return packageName.startsWith("com.oplus.") ||
+               packageName.startsWith("com.coloros.") ||
+               packageName.startsWith("com.oppo.os.") ||
+               packageName.startsWith("com.oppo.ambient.") ||
+               packageName.startsWith("com.nearme.")
+    }
+    
+    /**
+     * ⚡ CRÍTICO PARA OPPO A80: Filtrado HeyTap (tienda/servicios OPPO)
+     */
+    private fun isHeyTapSystemApp(packageName: String): Boolean {
+        return packageName.startsWith("com.heytap.") ||
+               packageName.startsWith("com.oppo.market.") ||
+               packageName == "com.oppo.usercenter"
     }
 }

@@ -22,6 +22,7 @@ import java.util.*
 fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
     var isLoading by remember { mutableStateOf(true) }
     var appsInfo by remember { mutableStateOf<List<MediaAccessScanner.MediaAccessInfo>>(emptyList()) }
+    var privacyReport by remember { mutableStateOf<MediaAccessScanner.MediaPrivacyReport?>(null) }
     val scope = rememberCoroutineScope()
     
     // Cargar información al abrir
@@ -30,6 +31,9 @@ fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
             isLoading = true
             appsInfo = withContext(Dispatchers.IO) {
                 MediaAccessScanner.getDetailedMediaAccessInfo(context)
+            }
+            privacyReport = withContext(Dispatchers.IO) {
+                MediaAccessScanner.generatePrivacyReport(context)
             }
             isLoading = false
         }
@@ -72,7 +76,14 @@ fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
                 color = Color.Gray,
                 modifier = Modifier.padding(8.dp)
             )
-        } else if (appsInfo.isEmpty()) {
+        } else {
+            // ✅ REPORTE ESTADÍSTICO COMPLETO
+            privacyReport?.let { report ->
+                PrivacyReportCard(report)
+                Spacer(Modifier.height(16.dp))
+            }
+            
+            if (appsInfo.isEmpty()) {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = Color(0xFF4CAF50).copy(alpha = 0.15f)
@@ -214,12 +225,130 @@ fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
                             Text(
                                 text = "• ${perm.substringAfterLast('.')}",
                                 fontSize = 11.sp,
-                                color = Color.Gray,
-                                modifier = Modifier.padding(start = 8.dp, top = 2.dp)
-                            )
-                        }
-                    }
+            }
+        }
+        
+        Spacer(Modifier.height(16.dp))
+        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+            Text("Volver")
+        }
+    }
+}
+
+@Composable
+private fun PrivacyReportCard(report: MediaAccessScanner.MediaPrivacyReport) {
+    val reportColor = when {
+        report.criticalApps > 0 -> Color(0xFFB3261E)
+        report.highRiskApps > 0 -> Color(0xFFFBBF24)
+        report.totalAppsWithAccess == 0 -> Color(0xFF10B981)
+        else -> Color(0xFF5D8BF4)
+    }
+    
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = reportColor.copy(alpha = 0.15f)
+        ),
+        border = androidx.compose.foundation.BorderStroke(1.dp, reportColor)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "📊 Resumen de Privacidad",
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                color = reportColor
+            )
+            
+            Spacer(Modifier.height(12.dp))
+            
+            // Estadísticas principales
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                StatColumn("Total Apps", "${report.totalAppsWithAccess}")
+                StatColumn("Críticas", "${report.criticalApps}", Color(0xFFB3261E))
+                StatColumn("Alto Riesgo", "${report.highRiskApps}", Color(0xFFFBBF24))
+            }
+            
+            Spacer(Modifier.height(12.dp))
+            Divider()
+            Spacer(Modifier.height(12.dp))
+            
+            // Detalles específicos
+            if (report.appsWithWriteAccess > 0) {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text("✏️", fontSize = 16.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "${report.appsWithWriteAccess} apps pueden MODIFICAR/ELIMINAR archivos",
+                        fontSize = 12.sp,
+                        color = Color(0xFFB3261E)
+                    )
                 }
+                Spacer(Modifier.height(6.dp))
+            }
+            
+            if (report.appsWithLocationAccess > 0) {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text("📍", fontSize = 16.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "${report.appsWithLocationAccess} apps pueden extraer ubicación GPS de fotos",
+                        fontSize = 12.sp,
+                        color = Color(0xFFB3261E)
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+            
+            if (report.suspiciousApps.isNotEmpty()) {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text("👁️", fontSize = 16.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "${report.suspiciousApps.size} apps con patrones sospechosos detectados",
+                        fontSize = 12.sp,
+                        color = Color(0xFFB3261E)
+                    )
+                }
+            }
+            
+            // Recomendaciones
+            if (report.recommendations.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Divider()
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "💡 Recomendaciones:",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                report.recommendations.forEach { rec ->
+                    Text(
+                        text = "• $rec",
+                        fontSize = 11.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(start = 8.dp, top = 4.dp),
+                        lineHeight = 14.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatColumn(label: String, value: String, color: Color = Color(0xFF5D8BF4)) {
+    Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+        Text(
+            text = value,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            color = color
+        )
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            color = Color.Gray
+        )       }
             }
         }
         

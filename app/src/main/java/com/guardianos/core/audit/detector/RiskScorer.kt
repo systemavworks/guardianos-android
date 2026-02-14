@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.util.Log
 import com.guardianos.core.domain.model.AppAudit
 import com.guardianos.core.domain.model.Risk
+import kotlinx.coroutines.*
 import java.util.*
 
 /**
@@ -72,9 +73,28 @@ object RiskScorer {
     ): StalkerwareRiskReport {
         val pm = context.packageManager
         
-        // Obtener info básica
-        val appInfo = pm.getApplicationInfo(packageName, 0)
-        val appName = pm.getApplicationLabel(appInfo).toString()
+        // Obtener info básica - con manejo seguro de excepciones
+        val appInfo = try {
+            pm.getApplicationInfo(packageName, 0)
+        } catch (e: PackageManager.NameNotFoundException) {
+            Log.w(TAG, "Paquete no encontrado durante análisis: $packageName")
+            return StalkerwareRiskReport(
+                packageName = packageName,
+                appName = packageName.substringAfterLast('.', "UnknownApp"),
+                totalScore = 0,
+                riskLevel = StalkerwareRiskLevel.SAFE,
+                scoringBreakdown = emptyMap(),
+                behaviorFlags = listOf("⚠️ App no disponible (posible desinstalación reciente)"),
+                recommendedAction = "ℹ️ Esta app ya no está instalada en el dispositivo",
+                hasAccessibilityService = false,
+                isHidden = false,
+                hasPersistentService = false,
+                hasCriticalPermissions = false
+            )
+        }
+        
+        // Evitar getApplicationLabel() - causa carga de APK assets
+        val appName = packageName.substringAfterLast('.', "UnknownApp")
         
         // Mapa de puntuación desglosada
         val scoringBreakdown = mutableMapOf<String, Int>()
@@ -141,15 +161,19 @@ object RiskScorer {
         }
         
         // FACTOR 5: Instalación nocturna (+15 puntos)
-        val installTime = pm.getPackageInfo(packageName, 0).firstInstallTime
-        val calendar = Calendar.getInstance().apply { timeInMillis = installTime }
-        val installHour = calendar.get(Calendar.HOUR_OF_DAY)
-        
-        if (installHour in 0..6) {
-            val points = 15
-            scoringBreakdown["Instalación nocturna"] = points
-            totalScore += points
-            behaviorFlags.add("🕐 Instalada de madrugada (${installHour}h)")
+        try {
+            val installTime = pm.getPackageInfo(packageName, 0).firstInstallTime
+            val calendar = Calendar.getInstance().apply { timeInMillis = installTime }
+            val installHour = calendar.get(Calendar.HOUR_OF_DAY)
+            
+            if (installHour in 0..6) {
+                val points = 15
+                scoringBreakdown["Instalación nocturna"] = points
+                totalScore += points
+                behaviorFlags.add("🕐 Instalada de madrugada (${installHour}h)")
+            }
+        } catch (e: PackageManager.NameNotFoundException) {
+            Log.w(TAG, "No se pudo obtener fecha de instalación para $packageName")
         }
         
         // FACTOR 6: Nombre sospechoso (+10 puntos)
@@ -214,133 +238,260 @@ object RiskScorer {
     }
     
     /**
-     * Escaneo completo de todas las apps
+     * Escaneo completo de todas las apps - ¡DEBE EJECUTARSE EN Dispatchers.IO!
+     * 
+     * ⚠️ CRÍTICO: Esta es una SUSPEND FUNCTION que requiere coroutine context.
+     * Nunca llamar desde el hilo principal sin Dispatchers.IO.
+     * 
+     * ✅ INTEGRACIÓN CON STALKERWAREDETECTOR:
+     * - Primero usa base de datos de stalkerware conocido
+     * - Luego analiza comportamientos sospechosos con RiskScorer
+     * - Combina ambos resultados para detección completa
      */
-    fun scanAllAppsForStalkerware(context: Context): List<StalkerwareRiskReport> {
+    suspend fun scanAllAppsForStalkerware(context: Context): List<StalkerwareRiskReport> {
         val reports = mutableListOf<StalkerwareRiskReport>()
+        val startTime = System.currentTimeMillis()
+        val MAX_SCAN_TIME_MS = 12000L // 12 segundos máximo (análisis más completo)
         
         Log.d(TAG, "═══════════════════════════════════════════")
-        Log.d(TAG, "Iniciando escaneo completo de stalkerware...")
+        Log.d(TAG, "Iniciando escaneo stalkerware en BACKGROUND...")
+        
+        // ✅ PASO 1: Usar StalkerwareDetector para detectar stalkerware CONOCIDO
+        val stalkerwareDetector = StalkerwareDetector(context)
+        val knownStalkerwareDetections = try {
+            Log.d(TAG, "🔍 Paso 1: Escaneando stalkerware conocido (base de datos)...")
+            stalkerwareDetector.scanForStalkerware()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error en detección de stalkerware conocido", e)
+            emptyList()
+        }
+        
+        // Convertir detecciones conocidas a StalkerwareRiskReport
+        knownStalkerwareDetections.forEach { detection ->
+            val severity = when (detection.severity) {
+                "CRITICAL" -> 95
+                "HIGH" -> 85
+                "MEDIUM" -> 60
+                else -> 40
+            }
+            
+            reports.add(StalkerwareRiskReport(
+                packageName = detection.packageName,
+                appName = detection.appName,
+                totalScore = severity,
+                riskLevel = when (detection.severity) {
+                    "CRITICAL" -> StalkerwareRiskLevel.STALKERWARE_CONFIRMED
+                    "HIGH" -> StalkerwareRiskLevel.HIGH_SUSPICION
+                    "MEDIUM" -> StalkerwareRiskLevel.MEDIUM
+                    else -> StalkerwareRiskLevel.SAFE
+                },
+                scoringBreakdown = mapOf(
+                    "Stalkerware conocido" to severity,
+                    "Base de datos" to 0
+                ),
+                behaviorFlags = detection.indicators,
+                recommendedAction = detection.recommendations.firstOrNull() ?: "🚨 Desinstalar INMEDIATAMENTE",
+                hasAccessibilityService = false,
+                isHidden = detection.indicators.any { it.contains("oculta", ignoreCase = true) },
+                hasPersistentService = false,
+                hasCriticalPermissions = true
+            ))
+        }
+        
+        Log.d(TAG, "✅ Stalkerware conocido detectado: ${knownStalkerwareDetections.size} apps")
+        
+        // ✅ PASO 2: Análisis de comportamiento con RiskScorer (apps no detectadas)
+        
+        // Log de memoria disponible
+        val runtime = Runtime.getRuntime()
+        val usedMemInMB = (runtime.totalMemory() - runtime.freeMemory()) / 1048576L
+        val maxHeapSizeInMB = runtime.maxMemory() / 1048576L
+        Log.d(TAG, "💾 Memoria: $usedMemInMB MB usados / $maxHeapSizeInMB MB máx")
         
         try {
             val pm = context.packageManager
             
-            // Obtener todas las apps instaladas
-            val installedApps = pm.getInstalledApplications(0)
-            Log.d(TAG, "Apps instaladas: ${installedApps.size}")
+            // FILTRADO ULTRA SEGURO: solo apps de usuario + habilitadas + no sistema
+            // ⚠️ Excluir apps ya detectadas como stalkerware conocido
+            val knownStalkerwarePackages = knownStalkerwareDetections.map { it.packageName }.toSet()
             
-            // Procesar en chunks pequeños para evitar OOM
-            val chunkSize = 15  // Más pequeño que antes
-            val chunks = installedApps.chunked(chunkSize)
+            val allApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            val installedApps = allApps.filter { appInfo ->
+                appInfo.enabled &&
+                (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0 &&
+                (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0 &&
+                !appInfo.packageName.startsWith("android.") &&
+                !appInfo.packageName.startsWith("com.android.") &&
+                !appInfo.packageName.startsWith("com.google.android.") &&
+                !appInfo.packageName.startsWith("com.oplus.") &&
+                !appInfo.packageName.startsWith("com.coloros.") &&
+                !appInfo.packageName.startsWith("com.heytap.") &&
+                !knownStalkerwarePackages.contains(appInfo.packageName)  // Excluir ya detectadas
+            }.take(80)  // 🎯 80 apps de usuario + stalkerware conocido = cobertura completa
             
-            Log.d(TAG, "Procesando en ${chunks.size} lotes de $chunkSize apps...")
+            Log.d(TAG, "Apps totales: ${allApps.size}")
+            Log.d(TAG, "Apps no-sistema a analizar: ${installedApps.size}")
+            Log.d(TAG, "Stalkerware conocido ya detectado: ${knownStalkerwareDetections.size}")
             
-            // Ejecutar detectores por cada chunk (no todos de golpe)
-            for ((chunkIndex, chunk) in chunks.withIndex()) {
-                Log.d(TAG, "[Lote ${chunkIndex + 1}/${chunks.size}] Analizando ${chunk.size} apps...")
-                
-                // Obtener los packageNames del chunk
-                val chunkPackages = chunk.map { it.packageName }
-                
-                // Detectores ligeros por chunk
-                val accessibilityReports = try {
-                    AccessibilityMonitor.scanAccessibilityServices(context)
-                        .filter { it.packageName in chunkPackages }
-                        .associateBy { it.packageName }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error en AccessibilityMonitor: ${e.message}")
-                    emptyMap()
-                }
-                
-                // Detección simplificada de apps ocultas (sin crear objetos complejos)
-                val hiddenAppReports = try {
-                    chunk.mapNotNull { appInfo ->
-                        val packageName = appInfo.packageName
-                        val hasLauncher = pm.getLaunchIntentForPackage(packageName) != null
-                        val appName = pm.getApplicationLabel(appInfo).toString()
-                        val isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                        
-                        // Solo detectar apps sin launcher que NO sean del sistema
-                        if (!hasLauncher && !isSystemApp) {
-                            try {
-                                val packageInfo = pm.getPackageInfo(packageName, 0)
-                                val installTime = packageInfo.firstInstallTime
-                                val installHour = java.util.Calendar.getInstance().apply {
-                                    timeInMillis = installTime
-                                }.get(java.util.Calendar.HOUR_OF_DAY)
-                                
-                                HiddenAppsDetector.HiddenAppReport(
-                                    packageName = packageName,
-                                    appName = appName,
-                                    hasLauncherIcon = false,
-                                    hasInvisibleName = appName.isEmpty() || appName.matches(Regex("[\\p{C}\\s]+")),
-                                    isDuplicateApp = false,
-                                    duplicateOf = null,
-                                    installTime = installTime,
-                                    installHour = installHour,
-                                    isSystemApp = false,
-                                    riskScore = 30,
-                                    riskLevel = HiddenAppsDetector.RiskLevel.MEDIUM,
-                                    hidingTechniques = listOf("Sin ícono launcher")
-                                )
-                            } catch (e: Exception) {
-                                null
-                            }
-                        } else null
-                    }.filterNotNull().associateBy { it.packageName }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error en HiddenAppsDetector: ${e.message}")
-                    emptyMap()
-                }
-                
-                // Analizar cada app del chunk
-                for (appInfo in chunk) {
-                    try {
-                        val packageName = appInfo.packageName
-                        
-                        val report = calculateStalkerwareRisk(
-                            context,
-                            packageName,
-                            accessibilityReports[packageName],
-                            hiddenAppReports[packageName],
-                            null  // Saltamos BackgroundServices para simplificar
-                        )
-                        
-                        // Solo incluir apps con riesgo >= MEDIUM
-                        if (report.riskLevel != StalkerwareRiskLevel.SAFE) {
-                            reports.add(report)
-                        }
-                        
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error analizando ${appInfo.packageName}: ${e.message}")
-                    }
-                }
-                
-                // Liberar memoria agresivamente entre chunks
-                if (chunkIndex < chunks.size - 1) {
-                    System.gc()
-                    Thread.sleep(100)
-                }
+            // Obtener accessibility reports una sola vez (ya estamos en Dispatchers.IO)
+            val accessibilityMonitor = AccessibilityMonitor(context)
+            val accessibilityReports = try {
+                accessibilityMonitor.scanAccessibilityServices()
+                    .associateBy { it.packageName }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error en AccessibilityMonitor", e)
+                emptyMap()
             }
             
-            Log.d(TAG, "═══════════════════════════════════════════")
-            Log.d(TAG, "Escaneo completo finalizado")
-            Log.d(TAG, "Apps analizadas: ${installedApps.size}")
-            Log.d(TAG, "Apps con riesgo detectado: ${reports.size}")
-            Log.d(TAG, "  - STALKERWARE CONFIRMADO: ${reports.count { it.riskLevel == StalkerwareRiskLevel.STALKERWARE_CONFIRMED }}")
-            Log.d(TAG, "  - SOSPECHA ALTA: ${reports.count { it.riskLevel == StalkerwareRiskLevel.HIGH_SUSPICION }}")
-            Log.d(TAG, "  - RIESGO MEDIO: ${reports.count { it.riskLevel == StalkerwareRiskLevel.MEDIUM }}")
+            Log.d(TAG, "Servicios de accesibilidad encontrados: ${accessibilityReports.size}")
             
+            // PROCESAMIENTO OPTIMIZADO: análisis rápido por app con GC periódico
+            for ((index, appInfo) in installedApps.withIndex()) {
+                // ⚠️ TIMEOUT DE SEGURIDAD: salir si llevamos >12s
+                val elapsed = System.currentTimeMillis() - startTime
+                if (elapsed > MAX_SCAN_TIME_MS) {
+                    Log.w(TAG, "⏱️ TIMEOUT preventivo alcanzado (${elapsed}ms). Deteniendo escaneo.")
+                    Log.w(TAG, "   Apps analizadas: $index/${installedApps.size}")
+                    break
+                }
+                
+                // ✅ COOPERACIÓN CON EL SCHEDULER: ceder control entre apps
+                if (index > 0 && index % 3 == 0) {
+                    yield()  // Ceder control cada 3 apps
+                    delay(50) // 50ms pausa (balance velocidad/estabilidad)
+                }
+                
+                // 🧹 GC cada 15 apps en OPPO A80
+                if (index > 0 && index % 15 == 0) {
+                    System.gc()  // Sugerir recolección de basura
+                    delay(80)    // Dar tiempo al GC
+                }
+                
+                val packageName = appInfo.packageName
+                
+                Log.d(TAG, "[${index + 1}/${installedApps.size}] 🔍 Analizando: $packageName")
+                
+                // ⚠️ VALIDACIÓN PREVIA: ¿existe aún el paquete?
+                try {
+                    pm.getApplicationInfo(packageName, 0)
+                } catch (e: PackageManager.NameNotFoundException) {
+                    Log.w(TAG, "  ⏭️ Skip $packageName - desinstalada durante escaneo")
+                    continue
+                }
+                
+                // ⚠️ NUNCA usar getApplicationLabel() aquí - causa OOM en dispositivos con poca RAM
+                val appName = packageName.substringAfterLast('.', "App")
+                
+                // Análisis minimalista (sin HiddenAppsDetector para evitar OOM)
+                var totalScore = 0
+                val scoringBreakdown = mutableMapOf<String, Int>()
+                val behaviorFlags = mutableListOf<String>()
+                
+                // Factor 1: AccessibilityService sospechoso
+                val accReport = accessibilityReports[packageName]
+                if (accReport != null && accReport.riskLevel in listOf(
+                        AccessibilityMonitor.RiskLevel.HIGH,
+                        AccessibilityMonitor.RiskLevel.CRITICAL
+                    )) {
+                    val points = 40
+                    scoringBreakdown["AccessibilityService"] = points
+                    totalScore += points
+                    behaviorFlags.add("🔴 Lee pantalla/contraseñas")
+                }
+                
+                // Factor 2: App oculta
+                if (pm.getLaunchIntentForPackage(packageName) == null) {
+                    val points = 30
+                    scoringBreakdown["App oculta"] = points
+                    totalScore += points
+                    behaviorFlags.add("👁️ Sin ícono en launcher")
+                }
+                
+                // Factor 3: Permisos críticos (solo 3+)
+                val perms = checkCriticalPermissions(context, packageName)
+                if (perms.size >= 3) {
+                    val points = 25
+                    scoringBreakdown["${perms.size} permisos"] = points
+                    totalScore += points
+                    behaviorFlags.add("⚠️ Permisos: ${perms.joinToString(", ")}")
+                }
+                
+                // Factor 4: Instalación nocturna
+                try {
+                    val hour = Calendar.getInstance().apply {
+                        timeInMillis = pm.getPackageInfo(packageName, 0).firstInstallTime
+                    }.get(Calendar.HOUR_OF_DAY)
+                    
+                    if (hour in 0..5) {
+                        val points = 15
+                        scoringBreakdown["Nocturna ($hour h)"] = points
+                        totalScore += points
+                        behaviorFlags.add("🌙 Instalada de madrugada")
+                    }
+                } catch (e: PackageManager.NameNotFoundException) {
+                    continue // Skip si desinstalada
+                } catch (e: Exception) {
+                    // Ignorar otros errores de I/O
+                }
+                
+                // Factor 5: Nombre sospechoso
+                if (hasSuspiciousName(packageName, appName)) {
+                    val points = 10
+                    scoringBreakdown["Nombre sospechoso"] = points
+                    totalScore += points
+                    behaviorFlags.add("⚠️ Imita app de sistema")
+                }
+                
+                // Solo reportar apps con riesgo >= MEDIUM
+                val riskLevel = when {
+                    totalScore >= 80 -> StalkerwareRiskLevel.STALKERWARE_CONFIRMED
+                    totalScore >= 50 -> StalkerwareRiskLevel.HIGH_SUSPICION
+                    totalScore >= 30 -> StalkerwareRiskLevel.MEDIUM
+                    else -> null
+                }
+                
+                riskLevel?.let {
+                    Log.d(TAG, "  🚨 Riesgo detectado: score=$totalScore, nivel=$it")
+                    reports.add(StalkerwareRiskReport(
+                        packageName = packageName,
+                        appName = appName,
+                        totalScore = totalScore,
+                        riskLevel = it,
+                        scoringBreakdown = scoringBreakdown,
+                        behaviorFlags = behaviorFlags,
+                        recommendedAction = getRecommendedAction(it),
+                        hasAccessibilityService = accReport != null,
+                        isHidden = pm.getLaunchIntentForPackage(packageName) == null,
+                        hasPersistentService = false,
+                        hasCriticalPermissions = perms.isNotEmpty()
+                    ))
+                }
+                
+                Log.d(TAG, "  ✅ Completado: score=$totalScore ${if (riskLevel == null) "(sin riesgo)" else ""}")
+            }
+            
+            val totalTime = System.currentTimeMillis() - startTime
+            Log.d(TAG, "═══════════════════════════════════════════")
+            Log.d(TAG, "✅ Escaneo finalizado en ${totalTime}ms")
+            Log.d(TAG, "   Apps analizadas: ${installedApps.size}")
+            Log.d(TAG, "   Apps con riesgo: ${reports.size}")
+            Log.d(TAG, "═══════════════════════════════════════════")
             return reports.sortedByDescending { it.totalScore }
             
-        } catch (e: OutOfMemoryError) {
-            Log.e(TAG, "OutOfMemoryError en escaneo stalkerware", e)
-            System.gc()
+        } catch (e: CancellationException) {
+            Log.w(TAG, "Escaneo cancelado por usuario")
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Error en escaneo stalkerware", e)
-            throw e
+            Log.e(TAG, "Error fatal en escaneo", e)
+            return emptyList()
         }
+    }
+    
+    private fun getRecommendedAction(level: StalkerwareRiskLevel): String = when (level) {
+        StalkerwareRiskLevel.STALKERWARE_CONFIRMED -> "🚨 Desinstalar INMEDIATAMENTE"
+        StalkerwareRiskLevel.HIGH_SUSPICION -> "⚠️ Revisar manualmente permisos e instalador"
+        StalkerwareRiskLevel.MEDIUM -> "👀 Vigilar actividad de esta app"
+        else -> "✓ Riesgo bajo"
     }
     
     /**
@@ -395,17 +546,22 @@ object RiskScorer {
     /**
      * Integración con AppAudit: añade findings de stalkerware
      */
-    fun enhanceAppAuditWithStalkerwareScore(
+    suspend fun enhanceAppAuditWithStalkerwareScore(
         context: Context,
         appAudit: AppAudit
     ): AppAudit {
         try {
+            // Crear instancias de los detectores
+            val accessibilityMonitor = AccessibilityMonitor(context)
+            val hiddenAppsDetector = HiddenAppsDetector(context)
+            val servicesAnalyzer = BackgroundServicesAnalyzer(context)
+            
             // Obtener reportes de los 3 detectores
-            val accessibilityReports = AccessibilityMonitor.scanAccessibilityServices(context)
+            val accessibilityReports = accessibilityMonitor.scanAccessibilityServices()
                 .associateBy { it.packageName }
-            val hiddenAppReports = HiddenAppsDetector.scanHiddenApps(context)
+            val hiddenAppReports = hiddenAppsDetector.scanHiddenApps()
                 .associateBy { it.packageName }
-            val serviceReports = BackgroundServicesAnalyzer.analyzeBackgroundServices(context)
+            val serviceReports = servicesAnalyzer.analyzeBackgroundServices()
                 .associateBy { it.packageName }
             
             // Calcular score

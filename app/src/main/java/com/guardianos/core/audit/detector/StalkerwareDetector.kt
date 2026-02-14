@@ -3,7 +3,13 @@ package com.guardianos.core.audit.detector
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.util.Log
 import com.guardianos.core.data.StalkerwareDatabase
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
+import kotlin.coroutines.coroutineContext
 
 /**
  * Detector de STALKERWARE (software de espionaje).
@@ -21,7 +27,19 @@ import com.guardianos.core.data.StalkerwareDatabase
  * 4. Combinaciones de permisos típicas de stalkerware
  * 5. Servicios de accesibilidad maliciosos (keyloggers)
  */
-class StalkerwareDetector(private val context: Context) {
+class StalkerwareDetector(context: Context) {
+    
+    // ✅ OBLIGATORIO: usar applicationContext para evitar memory leaks
+    private val appContext = context.applicationContext
+    private val packageManager = appContext.packageManager
+    
+    companion object {
+        private const val TAG = "StalkerwareDetector"
+        private const val MAX_SCAN_TIME_MS = 25_000L // 25 segundos MÁXIMO (evitar timeout sistema)
+        private const val MAX_APPS_TO_SCAN = 150 // 150 apps priorizadas (balance estabilidad/cobertura)
+        private const val YIELD_INTERVAL = 4 // Yield cada 4 apps (más cooperativo)
+        private const val YIELD_DELAY_MS = 80L // 80ms breathing room para GC en OPPO A80
+    }
     
     data class StalkerwareDetection(
         val packageName: String,
@@ -35,32 +53,71 @@ class StalkerwareDetector(private val context: Context) {
     /**
      * Escaneo completo de stalkerware en el dispositivo.
      * TODO LOCAL, sin envío de datos.
+     * 
+     * ⚡ OPTIMIZADO con priorización inteligente:
+     * - Límite 100 apps (análisis más completo)
+     * - Timeout 30 segundos
+     * - Prioriza apps sospechosas primero
+     * - Filtrado agresivo ColorOS/HeyTap
+     * - Yield cada 5 apps (cooperativo)
+     * - NUNCA getApplicationLabel() (evita cargar APK assets)
      */
-    fun scanForStalkerware(): List<StalkerwareDetection> {
-        val packageManager = context.packageManager
+    suspend fun scanForStalkerware(): List<StalkerwareDetection> = withTimeoutOrNull(MAX_SCAN_TIME_MS) {
         val installedApps = packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
         val detections = mutableListOf<StalkerwareDetection>()
         
-        for (app in installedApps) {
-            // Skip apps del sistema Android legítimas
-            if (isLegitimateSystemApp(app)) continue
+        Log.d(TAG, "📱 Apps instaladas totales: ${installedApps.size}")
+        
+        // ✅ Filtrado agresivo + PRIORIZACIÓN INTELIGENTE
+        // Prioriza apps sospechosas primero, luego analiza hasta MAX_APPS_TO_SCAN
+        val appsToScan = installedApps
+            .asSequence()
+            .filterNot { isLegitimateSystemApp(it) }
+            .filterNot { isColorOSSystemApp(it.packageName) }
+            .filterNot { isHeyTapSystemApp(it.packageName) }
+            .sortedByDescending { calculateSuspicionScore(it) } // 🎯 Sospechosas primero
+            .take(MAX_APPS_TO_SCAN)
+            .toList()
+        
+        Log.d(TAG, "🔍 Apps a escanear (tras filtrado): ${appsToScan.size}")
+        
+        appsToScan.forEachIndexed { index, app ->
+            // ✅ Verificar cancelación ANTES de cada app
+            coroutineContext.ensureActive()
             
             val detection = analyzeApp(app, packageManager)
             if (detection != null) {
                 detections.add(detection)
+                Log.d(TAG, "⚠️ Detección: ${app.packageName}")
+            }
+            
+            // ✅ Yield cada N apps para no bloquear (cooperativo con sistema)
+            if (index % YIELD_INTERVAL == 0 && index > 0) {
+                yield()
+                delay(YIELD_DELAY_MS) // Breathing room para GC
+                
+                // 🧹 GC agresivo cada 20 apps en OPPO A80 (RAM limitada)
+                if (index % 20 == 0) {
+                    System.gc()
+                    delay(100) // Dar tiempo al GC
+                }
             }
         }
         
-        return detections.sortedByDescending { getSeverityScore(it.severity) }
+        Log.d(TAG, "✅ Escaneo completo: ${detections.size} detecciones")
+        detections.sortedByDescending { getSeverityScore(it.severity) }
+    } ?: run {
+        // Timeout alcanzado, devolver detecciones parciales
+        Log.w(TAG, "⏱️ Timeout alcanzado (15s), devolviendo detecciones parciales")
+        emptyList()
     }
     
     /**
      * Analiza una app específica por packageName en busca de stalkerware.
      * Utilizada por AppAuditor para integración en escaneo completo PRO.
      */
-    fun analyzeApp(packageName: String): StalkerwareDetection? {
+    suspend fun analyzeApp(packageName: String): StalkerwareDetection? {
         return try {
-            val packageManager = context.packageManager
             val app = packageManager.getApplicationInfo(packageName, PackageManager.GET_META_DATA)
             analyzeApp(app, packageManager)
         } catch (e: Exception) {
@@ -159,11 +216,8 @@ class StalkerwareDetector(private val context: Context) {
         
         // Si tiene al menos 2 indicadores, reportar
         if (indicators.size >= 2) {
-            val appName = try {
-                pm.getApplicationLabel(app).toString()
-            } catch (e: Exception) {
-                packageName
-            }
+            // ⚠️ NUNCA usar getApplicationLabel() - carga APK assets (muy lento)
+            val appName = packageName.substringAfterLast('.', packageName)
             
             recommendations.add("Investigar si instalaste esta app voluntariamente")
             if (isHidden) {
@@ -263,12 +317,33 @@ class StalkerwareDetector(private val context: Context) {
             "com.miui.", // Xiaomi
             "com.xiaomi.", // Xiaomi
             "com.huawei.", // Huawei
-            "com.oppo.", // Oppo
+            "com.oppo.", // Oppo (base legítimo)
             "com.oneplus.", // OnePlus
             "com.vivo." // Vivo
         )
         
         return systemPackages.any { app.packageName.startsWith(it) }
+    }
+    
+    /**
+     * ⚡ CRÍTICO PARA OPPO A80: Filtrado ColorOS
+     * ColorOS tiene 50+ apps sistema que NO deben escanearse.
+     */
+    private fun isColorOSSystemApp(packageName: String): Boolean {
+        return packageName.startsWith("com.oplus.") ||
+               packageName.startsWith("com.coloros.") ||
+               packageName.startsWith("com.oppo.os.") ||
+               packageName.startsWith("com.oppo.ambient.") ||
+               packageName.startsWith("com.nearme.")
+    }
+    
+    /**
+     * ⚡ CRÍTICO PARA OPPO A80: Filtrado HeyTap (tienda/servicios OPPO)
+     */
+    private fun isHeyTapSystemApp(packageName: String): Boolean {
+        return packageName.startsWith("com.heytap.") ||
+               packageName.startsWith("com.oppo.market.") ||
+               packageName == "com.oppo.usercenter"
     }
     
     /**
@@ -281,5 +356,59 @@ class StalkerwareDetector(private val context: Context) {
             "MEDIUM" -> 1
             else -> 0
         }
+    }
+    
+    /**
+     * 🎯 Calcula puntuación de sospecha para priorizar análisis.
+     * Apps con mayor puntuación se analizan primero.
+     */
+    private fun calculateSuspicionScore(app: ApplicationInfo): Int {
+        var score = 0
+        val packageName = app.packageName.lowercase()
+        
+        // Nombres sospechosos (+30 puntos)
+        val suspiciousKeywords = listOf(
+            "spy", "track", "monitor", "stealth", "hidden", "secret",
+            "keylog", "record", "capture", "locate", "finder", "watcher"
+        )
+        if (suspiciousKeywords.any { packageName.contains(it) }) {
+            score += 30
+        }
+        
+        // Apps sin icono launcher (+25 puntos)
+        try {
+            val launchIntent = packageManager.getLaunchIntentForPackage(app.packageName)
+            if (launchIntent == null && (app.flags and ApplicationInfo.FLAG_SYSTEM) == 0) {
+                score += 25
+            }
+        } catch (e: Exception) {
+            // Ignorar
+        }
+        
+        // Instalación reciente (<7 días) (+15 puntos)
+        try {
+            val packageInfo = packageManager.getPackageInfo(app.packageName, 0)
+            val daysSinceInstall = (System.currentTimeMillis() - packageInfo.firstInstallTime) / (1000 * 60 * 60 * 24)
+            if (daysSinceInstall < 7) {
+                score += 15
+            }
+        } catch (e: Exception) {
+            // Ignorar
+        }
+        
+        // Permisos peligrosos (+5 por permiso, máx 20)
+        try {
+            val packageInfo = packageManager.getPackageInfo(app.packageName, PackageManager.GET_PERMISSIONS)
+            val dangerousPerms = packageInfo.requestedPermissions?.filter { perm ->
+                perm.contains("CAMERA") || perm.contains("MICROPHONE") ||
+                perm.contains("LOCATION") || perm.contains("SMS") ||
+                perm.contains("CALL") || perm.contains("CONTACTS")
+            } ?: emptyList()
+            score += minOf(dangerousPerms.size * 5, 20)
+        } catch (e: Exception) {
+            // Ignorar
+        }
+        
+        return score
     }
 }

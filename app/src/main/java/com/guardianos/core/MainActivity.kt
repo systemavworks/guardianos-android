@@ -2564,6 +2564,40 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(16.dp))
                 }
                 
+                // Info card cuando NO hay sospechosas (feedback positivo)
+                if (stats.suspiciousConnections == 0 && stats.totalConnections > 0) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF10B981).copy(alpha = 0.15f)
+                        ),
+                        border = BorderStroke(1.dp, Color(0xFF10B981))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = "✅", fontSize = 24.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Red segura",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = Color(0xFF10B981)
+                                )
+                                Text(
+                                    text = "No se detectaron conexiones sospechosas en ${stats.totalConnections} conexiones analizadas",
+                                    fontSize = 12.sp,
+                                    color = Color.Gray
+                                )
+                            }
+                        }
+                    }
+                    
+                    Spacer(Modifier.height(16.dp))
+                }
+                
                 // Empty state
                 if (connections.isEmpty()) {
                     Card(
@@ -2585,7 +2619,7 @@ class MainActivity : ComponentActivity() {
                             )
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                text = "No se detectaron conexiones de red en este momento.",
+                                text = "El escaneo se completó correctamente.\nNo se detectaron conexiones de red activas en este momento.\n\nEsto puede ser normal si no hay apps ejecutándose con acceso a internet.",
                                 fontSize = 14.sp,
                                 color = Color.Gray,
                                 textAlign = TextAlign.Center
@@ -2593,12 +2627,23 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 } else {
-                    // Connections list
-                    Text(
-                        text = "📡 Conexiones activas",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
+                    // Connections list header con más info
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "📡 Conexiones activas",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+                        Text(
+                            text = "${connections.map { it.packageName }.distinct().size} apps",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
                     
                     Spacer(Modifier.height(12.dp))
                     
@@ -2607,6 +2652,48 @@ class MainActivity : ComponentActivity() {
                     ) {
                         items(connections.size) { index ->
                             NetworkConnectionCard(connections[index])
+                        }
+                        
+                        // Resumen al final de la lista
+                        item {
+                            Spacer(Modifier.height(16.dp))
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surface
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp)
+                                ) {
+                                    Text(
+                                        text = "📊 Resumen del escaneo",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = "• Apps únicas: ${connections.map { it.packageName }.distinct().size}",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray
+                                    )
+                                    Text(
+                                        text = "• Conexiones totales: ${connections.size}",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray
+                                    )
+                                    Text(
+                                        text = "• Puertos HTTPS (443): ${connections.count { it.remotePort == 443 }}",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray
+                                    )
+                                    Text(
+                                        text = "• Puertos HTTP (80): ${connections.count { it.remotePort == 80 }}",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -4046,49 +4133,114 @@ class MainActivity : ComponentActivity() {
     private suspend fun exportISOAuditPDF(context: Context, results: List<ISOViolation>) {
         withContext(Dispatchers.IO) {
             try {
-                val timestamp = System.currentTimeMillis()
-                val fileName = "GuardianOS_ISO27001_$timestamp.pdf"
-                val pdfFile = File(context.getExternalFilesDir(null), fileName)
-                
-                val document = com.itextpdf.kernel.pdf.PdfDocument(
-                    com.itextpdf.kernel.pdf.PdfWriter(pdfFile)
+                // Obtener información completa del dispositivo
+                val deviceInfo = com.guardianos.core.domain.model.DeviceInfo(
+                    manufacturer = android.os.Build.MANUFACTURER,
+                    model = android.os.Build.MODEL,
+                    androidVersion = android.os.Build.VERSION.RELEASE,
+                    sdkVersion = android.os.Build.VERSION.SDK_INT,
+                    securityPatch = android.os.Build.VERSION.SECURITY_PATCH ?: "N/A"
                 )
-                val pdfDoc = com.itextpdf.layout.Document(document)
                 
-                val titleFont = com.itextpdf.kernel.font.PdfFontFactory.createFont(
-                    com.itextpdf.io.font.constants.StandardFonts.HELVETICA_BOLD
+                // Convertir ISOViolation a controles ISO estándar
+                val controls = mutableListOf<com.guardianos.core.domain.model.ISOControl>()
+                
+                // Controles estándar evaluados en la auditoría
+                val standardControls = listOf(
+                    "A.5.7" to "Inteligencia de amenazas",
+                    "A.5.23" to "Seguridad en servicios cloud",
+                    "A.8.9" to "Gestión de configuración",
+                    "A.8.23" to "Filtrado web",
+                    "A.8.24" to "Uso de criptografía",
+                    "A.8.28" to "Codificación segura"
                 )
-                pdfDoc.add(com.itextpdf.layout.element.Paragraph("AUDITORÍA ISO 27001")
-                    .setFont(titleFont).setFontSize(24f)
-                    .setTextAlignment(com.itextpdf.layout.properties.TextAlignment.CENTER))
                 
-                val score = if (results.isEmpty()) 100 else maxOf(0, 100 - (results.size * 10))
-                pdfDoc.add(com.itextpdf.layout.element.Paragraph("Cumplimiento: $score%")
-                    .setFont(titleFont).setFontSize(18f)
-                    .setTextAlignment(com.itextpdf.layout.properties.TextAlignment.CENTER))
-                
-                if (results.isNotEmpty()) {
-                    pdfDoc.add(com.itextpdf.layout.element.Paragraph("\nVIOLACIONES:").setFont(titleFont))
-                    results.forEach {
-                        pdfDoc.add(com.itextpdf.layout.element.Paragraph(
-                            "• ${it.control} (${it.severity}): ${it.description}\n"
-                        ))
+                // Determinar cumplimiento de cada control
+                standardControls.forEach { (id, name) ->
+                    val violations = results.filter { 
+                        it.control.contains(id, ignoreCase = true) || 
+                        it.description.contains(name, ignoreCase = true) 
                     }
+                    
+                    controls.add(
+                        com.guardianos.core.domain.model.ISOControl(
+                            id = id,
+                            name = name,
+                            description = "Control de seguridad según ISO 27001:2022",
+                            compliant = violations.isEmpty(),
+                            severity = when {
+                                violations.any { it.severity == "critical" } -> 
+                                    com.guardianos.core.domain.model.ControlSeverity.CRITICAL
+                                violations.any { it.severity == "high" } -> 
+                                    com.guardianos.core.domain.model.ControlSeverity.HIGH
+                                violations.any { it.severity == "medium" } -> 
+                                    com.guardianos.core.domain.model.ControlSeverity.MEDIUM
+                                else -> com.guardianos.core.domain.model.ControlSeverity.LOW
+                            },
+                            findings = violations.map { "${it.control}: ${it.description}" }
+                        )
+                    )
                 }
                 
-                pdfDoc.close()
+                // Calcular estadísticas
+                val criticalFindings = results.count { it.severity == "critical" }
+                val highFindings = results.count { it.severity == "high" }
+                val mediumFindings = results.count { it.severity == "medium" }
+                val compliance = ((controls.count { it.compliant }.toFloat() / controls.size) * 100)
+                
+                // Crear reporte completo
+                val isoReport = com.guardianos.core.domain.model.ISOAuditReport(
+                    deviceInfo = deviceInfo,
+                    scanTimestamp = System.currentTimeMillis(),
+                    controls = controls,
+                    overallCompliance = compliance,
+                    criticalFindings = criticalFindings,
+                    highFindings = highFindings,
+                    mediumFindings = mediumFindings,
+                    lowFindings = 0
+                )
+                
+                // Generar PDF profesional con ItextPDFGenerator (incluye SIEMPRE info del dispositivo)
+                val pdfFile = com.guardianos.core.pdf.ItextPDFGenerator.generateISOReport(
+                    context = context,
+                    isoReport = isoReport,
+                    forensicMode = false  // Cambiar a true para modo forense/legal con Device ID
+                )
                 
                 withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "✅ PDF ISO 27001 exportado\n\n" +
+                        "📱 ${deviceInfo.manufacturer} ${deviceInfo.model}\n" +
+                        "🤖 Android ${deviceInfo.androidVersion}\n" +
+                        "🔒 Cumplimiento: ${String.format("%.1f", compliance)}%",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    
+                    // Compartir PDF
                     val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdfFile)
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "application/pdf"
                         putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_SUBJECT, "Auditoría ISO 27001 - GuardianOS PRO")
+                        putExtra(Intent.EXTRA_TEXT, 
+                            "Auditoría ISO 27001:2022 generada por GuardianOS PRO\n\n" +
+                            "Dispositivo: ${deviceInfo.manufacturer} ${deviceInfo.model}\n" +
+                            "Android: ${deviceInfo.androidVersion}\n" +
+                            "Cumplimiento: ${String.format("%.1f", compliance)}%")
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
-                    context.startActivity(Intent.createChooser(intent, "Compartir informe"))
+                    context.startActivity(Intent.createChooser(intent, "Compartir auditoría ISO 27001"))
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error exporting ISO PDF", e)
+                Log.e(TAG, "Error al exportar PDF ISO 27001", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "❌ Error al generar PDF: ${e.localizedMessage}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             }
         }
     }

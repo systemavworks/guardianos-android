@@ -44,6 +44,14 @@ object MediaAccessScanner {
     /**
      * Obtiene información detallada de apps con permisos multimedia otorgados
      * + análisis de accesos reales y patrones sospechosos
+     * 
+     * ✅ ANÁLISIS EXHAUSTIVO v2.1:
+     * - Permisos multimedia Android 13+ (READ_MEDIA_IMAGES, etc.)
+     * - Permisos de almacenamiento legacy (READ/WRITE_EXTERNAL_STORAGE)
+     * - Permisos especiales (MANAGE_EXTERNAL_STORAGE)
+     * - Acceso a documentos (ACTION_OPEN_DOCUMENT)
+     * - Ubicación en fotos (ACCESS_MEDIA_LOCATION)
+     * - Permisos de instalación y sistema
      */
     fun getDetailedMediaAccessInfo(context: Context): List<MediaAccessInfo> {
         val pm = context.packageManager
@@ -296,6 +304,7 @@ object MediaAccessScanner {
     
     /**
      * Verifica si un permiso es relacionado con multimedia/almacenamiento
+     * ✅ EXHAUSTIVO: Incluye todos los permisos multimedia, documentos y almacenamiento
      */
     private fun isMediaOrStoragePermission(permission: String): Boolean {
         return permission.contains("READ_EXTERNAL_STORAGE") ||
@@ -303,7 +312,103 @@ object MediaAccessScanner {
                permission.contains("READ_MEDIA_IMAGES") ||
                permission.contains("READ_MEDIA_VIDEO") ||
                permission.contains("READ_MEDIA_AUDIO") ||
+               permission.contains("READ_MEDIA_VISUAL_USER_SELECTED") ||  // Android 14+
                permission.contains("MANAGE_EXTERNAL_STORAGE") ||
-               permission.contains("ACCESS_MEDIA_LOCATION")
+               permission.contains("ACCESS_MEDIA_LOCATION") ||
+               permission.contains("MANAGE_MEDIA") ||                        // Gestión multimedia
+               permission.contains("ACCESS_ALL_DOWNLOADS") ||                // Descargas
+               permission.contains("LOADER_USAGE_STATS") ||                  // Stats de archivos
+               // Permisos especiales peligrosos
+               permission.contains("REQUEST_INSTALL_PACKAGES") ||             // Instalar APKs
+               permission.contains("REQUEST_DELETE_PACKAGES") ||              // Borrar apps
+               permission.contains("WRITE_MEDIA_STORAGE") ||                  // Escritura SD
+               permission.contains("MOUNT_UNMOUNT_FILESYSTEMS") ||            // Montar SD
+               // Documentos y proveedores de contenido
+               permission == "android.permission.ACCESS_MEDIA_LOCATION" ||
+               permission == "android.permission.MANAGE_DOCUMENTS"
+    }
+    
+    /**
+     * Análisis adicional de permisos especiales peligrosos.
+     * Detecta apps con capacidades de modificación del sistema de archivos.
+     */
+    fun getAppsWithDangerousFileAccess(context: Context): List<MediaAccessInfo> {
+        val allApps = getDetailedMediaAccessInfo(context)
+        
+        // Filtrar solo apps con permisos CRÍTICOS
+        return allApps.filter { app ->
+            app.grantedPermissions.any { perm ->
+                perm.contains("MANAGE_EXTERNAL_STORAGE") ||
+                perm.contains("WRITE_EXTERNAL_STORAGE") ||
+                perm.contains("REQUEST_INSTALL_PACKAGES") ||
+                perm.contains("REQUEST_DELETE_PACKAGES")
+            }
+        }
+    }
+    
+    /**
+     * Genera reporte exhaustivo de privacidad multimedia.
+     * Devuelve resumen con estadísticas y recomendaciones.
+     */
+    data class MediaPrivacyReport(
+        val totalAppsWithAccess: Int,
+        val criticalApps: Int,
+        val highRiskApps: Int,
+        val appsWithWriteAccess: Int,
+        val appsWithLocationAccess: Int,
+        val suspiciousApps: List<MediaAccessInfo>,
+        val recommendations: List<String>
+    )
+    
+    fun generatePrivacyReport(context: Context): MediaPrivacyReport {
+        val allApps = getDetailedMediaAccessInfo(context)
+        
+        val criticalApps = allApps.count { it.riskLevel == "CRÍTICO" }
+        val highRiskApps = allApps.count { it.riskLevel == "ALTO" }
+        val appsWithWrite = allApps.count { app ->
+            app.grantedPermissions.any { it.contains("WRITE") }
+        }
+        val appsWithLocation = allApps.count { app ->
+            app.grantedPermissions.any { it.contains("MEDIA_LOCATION") }
+        }
+        
+        val suspiciousApps = allApps.filter { it.suspiciousPatterns.isNotEmpty() }
+        
+        val recommendations = mutableListOf<String>()
+        
+        if (criticalApps > 0) {
+            recommendations.add("🚨 Tienes $criticalApps apps con acceso CRÍTICO a tus archivos")
+            recommendations.add("Revisa y revoca permisos de apps que no necesitan acceso a fotos")
+        }
+        
+        if (appsWithWrite > 0) {
+            recommendations.add("⚠️ $appsWithWrite apps pueden MODIFICAR/ELIMINAR tus archivos")
+            recommendations.add("Solo apps de galería y editores deberían tener permisos de escritura")
+        }
+        
+        if (appsWithLocation > 0) {
+            recommendations.add("📍 $appsWithLocation apps pueden extraer ubicaciones GPS de tus fotos")
+            recommendations.add("Tu privacidad de ubicación puede estar comprometida")
+        }
+        
+        if (suspiciousApps.isNotEmpty()) {
+            recommendations.add("👁️ ${suspiciousApps.size} apps muestran patrones sospechosos de acceso")
+            recommendations.add("Revisa la lista de 'Apps con acceso multimedia' para más detalles")
+        }
+        
+        if (allApps.isEmpty()) {
+            recommendations.add("✅ Excelente: Ninguna app tiene acceso a tu multimedia")
+            recommendations.add("Tu privacidad de archivos está completamente protegida")
+        }
+        
+        return MediaPrivacyReport(
+            totalAppsWithAccess = allApps.size,
+            criticalApps = criticalApps,
+            highRiskApps = highRiskApps,
+            appsWithWriteAccess = appsWithWrite,
+            appsWithLocationAccess = appsWithLocation,
+            suspiciousApps = suspiciousApps,
+            recommendations = recommendations
+        )
     }
 }
