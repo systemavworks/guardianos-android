@@ -463,6 +463,7 @@ fun StalkerwareResultsScreen(
             Spacer(Modifier.height(12.dp))
             
             LazyColumn(
+                modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(reports) { report ->

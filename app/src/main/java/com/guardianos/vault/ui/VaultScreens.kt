@@ -562,6 +562,7 @@ fun FamilyVaultMainScreen(
             }
         } else {
             LazyColumn(
+                modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(filteredCredentials) { credential ->
@@ -1099,6 +1100,7 @@ fun DocumentVaultMainScreen(
             }
         } else {
             LazyColumn(
+                modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(filteredDocuments) { document ->
@@ -1630,6 +1632,7 @@ fun SecureDocumentsScreen(
                 }
             } else {
                 LazyColumn(
+                    modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(documents) { document ->

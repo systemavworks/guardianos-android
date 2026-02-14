@@ -108,6 +108,7 @@ fun ScanComparisonScreen(
         
         // Lista de cambios
         LazyColumn(
+            modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Apps nuevas

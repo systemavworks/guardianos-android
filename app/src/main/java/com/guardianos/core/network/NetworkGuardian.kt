@@ -78,22 +78,32 @@ class NetworkGuardian(private val context: Context) {
      * Obtiene información completa sobre la red WiFi actual.
      * Incluye análisis de seguridad, cifrado y recomendaciones.
      */
-    @android.annotation.SuppressLint("MissingPermission")
     fun getCurrentWifiInfo(): WifiNetworkInfo? {
-        val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
-            ?: return null
-        
-        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = connectivityManager.activeNetwork ?: return null
-        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return null
-        
-        // Verificar que es WiFi
-        if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-            android.util.Log.d(TAG, "No hay conexión WiFi activa")
-            return null
-        }
-        
-        val connectionInfo = wifiManager.connectionInfo
+        return try {
+            // Verificar permisos primero
+            if (context.checkSelfPermission(android.Manifest.permission.ACCESS_WIFI_STATE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                android.util.Log.w(TAG, "⚠️ Permiso ACCESS_WIFI_STATE no otorgado")
+                return null
+            }
+            if (context.checkSelfPermission(android.Manifest.permission.ACCESS_NETWORK_STATE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                android.util.Log.w(TAG, "⚠️ Permiso ACCESS_NETWORK_STATE no otorgado")
+                return null
+            }
+            
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+                ?: return null
+            
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = connectivityManager.activeNetwork ?: return null
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return null
+            
+            // Verificar que es WiFi
+            if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                android.util.Log.d(TAG, "No hay conexión WiFi activa")
+                return null
+            }
+            
+            val connectionInfo = wifiManager.connectionInfo
         val dhcpInfo = wifiManager.dhcpInfo
         
         // SSID (remover comillas)
@@ -208,7 +218,7 @@ class NetworkGuardian(private val context: Context) {
         android.util.Log.d(TAG, "   Velocidad: ${linkSpeed}Mbps")
         android.util.Log.d(TAG, "   IP: $ipAddress | Gateway: $gateway")
         
-        return WifiNetworkInfo(
+        WifiNetworkInfo(
             ssid = ssid,
             bssid = bssid,
             securityType = securityType,
@@ -224,6 +234,13 @@ class NetworkGuardian(private val context: Context) {
             vulnerabilities = vulnerabilities,
             recommendations = recommendations
         )
+        } catch (e: SecurityException) {
+            android.util.Log.e(TAG, "❌ SecurityException al acceder a info WiFi: ${e.message}")
+            null
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "❌ Error obteniendo info WiFi: ${e.message}", e)
+            null
+        }
     }
     
     /**
@@ -553,5 +570,182 @@ class NetworkGuardian(private val context: Context) {
         val capabilities = cm.getNetworkCapabilities(network) ?: return false
         
         return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+    
+    /**
+     * Escanea redes WiFi cercanas disponibles.
+     * Requiere permisos: ACCESS_FINE_LOCATION, ACCESS_WIFI_STATE, CHANGE_WIFI_STATE
+     */
+    data class NearbyWifiNetwork(
+        val ssid: String,
+        val bssid: String,
+        val securityType: String,
+        val signalStrength: Int,        // dBm
+        val signalLevel: Int,            // 0-4 (barras)
+        val frequency: Int,
+        val channel: Int,
+        val isCurrentNetwork: Boolean,
+        val capabilities: String,
+        val riskLevel: String,           // SEGURO, PRECAUCIÓN, PELIGROSO
+        val warnings: List<String>
+    )
+    
+    suspend fun scanNearbyWifiNetworks(): List<NearbyWifiNetwork> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val networks = mutableListOf<NearbyWifiNetwork>()
+        
+        try {
+            // Verificar permisos
+            val hasLocationPermission = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            } else {
+                true
+            }
+            
+            if (!hasLocationPermission) {
+                android.util.Log.w(TAG, "⚠️ Permiso ACCESS_FINE_LOCATION no otorgado para escaneo WiFi")
+                return@withContext emptyList()
+            }
+            
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+                ?: return@withContext emptyList()
+            
+            if (!wifiManager.isWifiEnabled) {
+                android.util.Log.w(TAG, "⚠️ WiFi desactivado")
+                return@withContext emptyList()
+            }
+            
+            // Iniciar escaneo
+            android.util.Log.d(TAG, "🔍 Iniciando escaneo de redes WiFi cercanas...")
+            val scanSuccess = wifiManager.startScan()
+            
+            if (!scanSuccess) {
+                android.util.Log.w(TAG, "⚠️ Fallo al iniciar escaneo WiFi")
+            }
+            
+            // Esperar un poco para que complete el escaneo
+            kotlinx.coroutines.delay(1500)
+            
+            // Obtener resultados
+            val scanResults = wifiManager.scanResults
+            val currentNetwork = getCurrentWifiInfo()
+            
+            android.util.Log.d(TAG, "✅ Redes WiFi encontradas: ${scanResults.size}")
+            
+            scanResults.forEach { result ->
+                val ssid = result.SSID
+                if (ssid.isBlank()) return@forEach // Redes ocultas
+                
+                val bssid = result.BSSID
+                val rssi = result.level
+                val frequency = result.frequency
+                val capabilities = result.capabilities
+                
+                // Detectar tipo de seguridad
+                val securityType = when {
+                    capabilities.contains("WPA3") -> "WPA3"
+                    capabilities.contains("WPA2") -> "WPA2"
+                    capabilities.contains("WPA") && !capabilities.contains("WPA2") -> "WPA"
+                    capabilities.contains("WEP") -> "WEP"
+                    capabilities.contains("OWE") -> "OWE" // Opportunistic Wireless Encryption
+                    else -> "ABIERTA"
+                }
+                
+                // Calcular canal
+                val channel = when {
+                    frequency in 2412..2484 -> (frequency - 2412) / 5 + 1
+                    frequency in 5170..5825 -> (frequency - 5170) / 5 + 34
+                    else -> 0
+                }
+                
+                // Nivel de señal (0-4 barras)
+                val signalLevel = android.net.wifi.WifiManager.calculateSignalLevel(rssi, 5)
+                
+                // Es la red actual?
+                val isCurrentNetwork = currentNetwork?.ssid == ssid
+                
+                // Evaluar riesgo
+                val warnings = mutableListOf<String>()
+                val riskLevel = when (securityType) {
+                    "WPA3", "WPA2" -> {
+                        if (rssi < -80) {
+                            warnings.add("Señal muy débil ($rssi dBm)")
+                        }
+                        "SEGURO"
+                    }
+                    "WPA" -> {
+                        warnings.add("WPA es vulnerable a ataques")
+                        warnings.add("Recomendado: WPA2/WPA3")
+                        "PRECAUCIÓN"
+                    }
+                    "WEP" -> {
+                        warnings.add("⚠️ WEP es EXTREMADAMENTE inseguro")
+                        warnings.add("Se puede hackear en menos de 1 minuto")
+                        warnings.add("NO USAR para nada sensible")
+                        "PELIGROSO"
+                    }
+                    "ABIERTA" -> {
+                        warnings.add("🚨 Red sin cifrado")
+                        warnings.add("TODO el tráfico es visible")
+                        warnings.add("Usar SOLO con VPN activa")
+                        "PELIGROSO"
+                    }
+                    else -> "DESCONOCIDO"
+                }
+                
+                // Detectar redes sospechosas (SSID común de honeypots)
+                val suspiciousSSIDs = listOf(
+                    "Free WiFi", "Free_WiFi", "FREE-WIFI",
+                    "Public WiFi", "Open WiFi",
+                    "Airport WiFi", "Hotel WiFi",
+                    "Starbucks", "McDonalds",
+                    "AndroidAP", "iPhone"
+                )
+                
+                if (suspiciousSSIDs.any { ssid.contains(it, ignoreCase = true) } && securityType == "ABIERTA") {
+                    warnings.add("⚠️ Nombre sospechoso - posible honeypot")
+                }
+                
+                // Detectar canales congestionados (2.4GHz)
+                if (frequency in 2412..2484 && channel in 1..11) {
+                    warnings.add("Canal $channel (2.4GHz) puede tener interferencias")
+                }
+                
+                networks.add(
+                    NearbyWifiNetwork(
+                        ssid = ssid,
+                        bssid = bssid,
+                        securityType = securityType,
+                        signalStrength = rssi,
+                        signalLevel = signalLevel,
+                        frequency = frequency,
+                        channel = channel,
+                        isCurrentNetwork = isCurrentNetwork,
+                        capabilities = capabilities,
+                        riskLevel = riskLevel,
+                        warnings = warnings
+                    )
+                )
+                
+                android.util.Log.d(TAG, "  📡 $ssid | $securityType | $rssi dBm | Canal $channel | ${if (isCurrentNetwork) "[CONECTADA]" else ""}")
+            }
+            
+            // Ordenar por fuerza de señal
+            networks.sortByDescending { it.signalStrength }
+            
+            android.util.Log.d(TAG, "═══════════════════════════════════════════")
+            android.util.Log.d(TAG, "Resumen de escaneo:")
+            android.util.Log.d(TAG, "  Total redes: ${networks.size}")
+            android.util.Log.d(TAG, "  Seguras (WPA2/WPA3): ${networks.count { it.securityType in listOf("WPA2", "WPA3") }}")
+            android.util.Log.d(TAG, "  Inseguras (WPA/WEP): ${networks.count { it.securityType in listOf("WPA", "WEP") }}")
+            android.util.Log.d(TAG, "  Abiertas: ${networks.count { it.securityType == "ABIERTA" }}")
+            android.util.Log.d(TAG, "═══════════════════════════════════════════")
+            
+        } catch (e: SecurityException) {
+            android.util.Log.e(TAG, "❌ SecurityException en escaneo WiFi: ${e.message}")
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "❌ Error escaneando redes WiFi: ${e.message}", e)
+        }
+        
+        return@withContext networks
     }
 }

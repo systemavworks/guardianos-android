@@ -29,8 +29,45 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var devices by remember { mutableStateOf<List<NetworkScanner.NetworkDevice>>(emptyList()) }
     var wifiInfo by remember { mutableStateOf<com.guardianos.core.network.NetworkGuardian.WifiNetworkInfo?>(null) }
+    var nearbyNetworks by remember { mutableStateOf<List<com.guardianos.core.network.NetworkGuardian.NearbyWifiNetwork>>(emptyList()) }
     var isScanning by remember { mutableStateOf(false) }
+    var currentTab by remember { mutableStateOf(0) } // 0=Red actual, 1=Redes WiFi, 2=Dispositivos
+    var needsLocationPermission by remember { mutableStateOf(false) }
+    var scanError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    
+    // Verificar permisos de ubicación
+    val hasLocationPermission = remember {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == 
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+    
+    // Launcher para solicitar permisos
+    val locationPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val allGranted = permissions.values.all { it }
+        if (allGranted) {
+            needsLocationPermission = false
+            // Re-escanear después de otorgar permisos
+            scope.launch {
+                isScanning = true
+                try {
+                    val guardian = com.guardianos.core.network.NetworkGuardian(context)
+                    nearbyNetworks = guardian.scanNearbyWifiNetworks()
+                } catch (e: Exception) {
+                    scanError = "Error al escanear: ${e.message}"
+                }
+                isScanning = false
+            }
+        } else {
+            needsLocationPermission = true
+        }
+    }
     
     // Cargar dispositivos conocidos al inicio
     LaunchedEffect(Unit) {
@@ -38,19 +75,49 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
         // Obtener información WiFi actual
         val guardian = com.guardianos.core.network.NetworkGuardian(context)
         wifiInfo = guardian.getCurrentWifiInfo()
+        
         // Escanear automáticamente al abrir
         isScanning = true
-        devices = withContext(Dispatchers.IO) {
-            NetworkScanner.scanLocalNetwork(context)
+        scanError = null
+        
+        try {
+            // Escanear redes WiFi cercanas y dispositivos en paralelo
+            val networksJob = launch {
+                try {
+                    if (hasLocationPermission) {
+                        nearbyNetworks = guardian.scanNearbyWifiNetworks()
+                    } else {
+                        needsLocationPermission = true
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("NetworkAnalyzer", "Error escaneando redes WiFi", e)
+                    scanError = "Error al escanear redes WiFi"
+                }
+            }
+            val devicesJob = launch {
+                try {
+                    devices = withContext(Dispatchers.IO) {
+                        NetworkScanner.scanLocalNetwork(context)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("NetworkAnalyzer", "Error escaneando dispositivos", e)
+                }
+            }
+            
+            networksJob.join()
+            devicesJob.join()
+        } catch (e: Exception) {
+            android.util.Log.e("NetworkAnalyzer", "Error general en escaneo", e)
+            scanError = "Error al realizar el escaneo"
+        } finally {
+            isScanning = false
         }
-        isScanning = false
     }
     
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
-            .verticalScroll(rememberScrollState())
     ) {
         // Header
         Row(
@@ -70,12 +137,41 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
                     onClick = {
                         scope.launch {
                             isScanning = true
-                            val guardian = com.guardianos.core.network.NetworkGuardian(context)
-                            wifiInfo = guardian.getCurrentWifiInfo()
-                            devices = withContext(Dispatchers.IO) {
-                                NetworkScanner.scanLocalNetwork(context)
+                            scanError = null
+                            
+                            try {
+                                val guardian = com.guardianos.core.network.NetworkGuardian(context)
+                                wifiInfo = guardian.getCurrentWifiInfo()
+                                
+                                val networksJob = launch {
+                                    try {
+                                        if (hasLocationPermission) {
+                                            nearbyNetworks = guardian.scanNearbyWifiNetworks()
+                                        } else {
+                                            needsLocationPermission = true
+                                        }
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("NetworkAnalyzer", "Error escaneando redes", e)
+                                    }
+                                }
+                                val devicesJob = launch {
+                                    try {
+                                        devices = withContext(Dispatchers.IO) {
+                                            NetworkScanner.scanLocalNetwork(context)
+                                        }
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("NetworkAnalyzer", "Error escaneando dispositivos", e)
+                                    }
+                                }
+                                
+                                networksJob.join()
+                                devicesJob.join()
+                            } catch (e: Exception) {
+                                android.util.Log.e("NetworkAnalyzer", "Error en re-escaneo", e)
+                                scanError = "Error al re-escanear"
+                            } finally {
+                                isScanning = false
                             }
-                            isScanning = false
                         }
                     }
                 ) {
@@ -93,7 +189,7 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
             )
         ) {
             Text(
-                text = "Escaneo avanzado de dispositivos en tu red Wi-Fi local. Detecta intrusos, puertos abiertos y analiza vulnerabilidades.",
+                text = "Análisis completo: red WiFi actual, redes cercanas disponibles y dispositivos conectados en tu red local.",
                 fontSize = 13.sp,
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.padding(12.dp)
@@ -102,47 +198,248 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
         
         Spacer(Modifier.height(16.dp))
         
-        // Estado de escaneo
-        if (isScanning) {
+        // Error de escaneo
+        if (scanError != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFFB3261E).copy(alpha = 0.15f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("⚠️", fontSize = 20.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = scanError!!,
+                        fontSize = 13.sp,
+                        color = Color(0xFFB3261E)
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        
+        // Alerta de permisos
+        if (needsLocationPermission && currentTab == 1) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
                     containerColor = Color(0xFFFBBF24).copy(alpha = 0.15f)
                 )
             ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(32.dp),
-                        strokeWidth = 3.dp
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "📍 Permisos de ubicación necesarios",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        color = Color(0xFFF59E0B)
                     )
-                    Spacer(Modifier.width(16.dp))
-                    Column {
-                        Text(
-                            text = "Escaneando red local...",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
-                        )
-                        Text(
-                            text = "Analizando tabla ARP, verificando conectividad y escaneando puertos",
-                            fontSize = 12.sp,
-                            color = Color.Gray
-                        )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Android requiere permisos de ubicación para escanear redes WiFi cercanas (no se usa tu ubicación real).",
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            locationPermissionLauncher.launch(
+                                arrayOf(
+                                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                                    android.Manifest.permission.ACCESS_COARSE_LOCATION
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Otorgar permisos")
                     }
                 }
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(8.dp))
         }
         
+        // Tabs
+        androidx.compose.material3.TabRow(
+            selectedTabIndex = currentTab,
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            androidx.compose.material3.Tab(
+                selected = currentTab == 0,
+                onClick = { currentTab = 0 },
+                text = { Text("Mi Red WiFi") }
+            )
+            androidx.compose.material3.Tab(
+                selected = currentTab == 1,
+                onClick = { currentTab = 1 },
+                text = { 
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Redes Cercanas")
+                        if (nearbyNetworks.isNotEmpty()) {
+                            Spacer(Modifier.width(4.dp))
+                            Surface(
+                                color = MaterialTheme.colorScheme.primary,
+                                shape = CircleShape
+                            ) {
+                                Text(
+                                    text = "${nearbyNetworks.size}",
+                                    fontSize = 10.sp,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            )
+            androidx.compose.material3.Tab(
+                selected = currentTab == 2,
+                onClick = { currentTab = 2 },
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Dispositivos")
+                        if (devices.isNotEmpty()) {
+                            Spacer(Modifier.width(4.dp))
+                            Surface(
+                                color = MaterialTheme.colorScheme.primary,
+                                shape = CircleShape
+                            ) {
+                                Text(
+                                    text = "${devices.size}",
+                                    fontSize = 10.sp,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            )
+        }
+        
+        Spacer(Modifier.height(16.dp))
+        
+        // Contenido según tab seleccionado
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+        ) {
+            when (currentTab) {
+                0 -> CurrentNetworkTab(wifiInfo, isScanning)
+                1 -> NearbyNetworksTab(nearbyNetworks, isScanning, needsLocationPermission)
+                2 -> DevicesTab(devices, isScanning)
+            }
+        }
+        
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = onBack,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Volver")
+        }
+    }
+}
+
+@Composable
+private fun CurrentNetworkTab(
+    wifiInfo: com.guardianos.core.network.NetworkGuardian.WifiNetworkInfo?,
+    isScanning: Boolean
+) {
+    if (isScanning) {
+        LoadingCard("Analizando red WiFi actual...")
+    } else if (wifiInfo != null) {
+        WifiInformationCard(wifiInfo)
+    } else {
+        EmptyStateCard(
+            icon = "📡",
+            title = "No conectado a WiFi",
+            message = "Conéctate a una red WiFi para ver información detallada"
+        )
+    }
+}
+
+@Composable
+private fun NearbyNetworksTab(
+    networks: List<com.guardianos.core.network.NetworkGuardian.NearbyWifiNetwork>,
+    isScanning: Boolean,
+    needsLocationPermission: Boolean
+) {
+    if (isScanning) {
+        LoadingCard("Escaneando redes WiFi cercanas...")
+    } else if (needsLocationPermission) {
+        // Mensaje ya mostrado arriba
+    } else if (networks.isEmpty()) {
+        EmptyStateCard(
+            icon = "🔍",
+            title = "No se encontraron redes",
+            message = "Activa el WiFi para escanear redes cercanas. Si el WiFi está activado, intenta re-escanear."
+        )
+    } else {
+        // Estadísticas de redes
+        val secureCount = networks.count { it.riskLevel == "SEGURO" }
+        val dangerousCount = networks.count { it.riskLevel == "PELIGROSO" }
+        
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = Color(0xFF10B981).copy(alpha = 0.15f)
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "📊 Resumen de Escaneo",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    color = Color(0xFF059669)
+                )
+                Spacer(Modifier.height(12.dp))
+                
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    StatItem("Total", "${networks.size}", Modifier.weight(1f))
+                    StatItem("Seguras", "$secureCount", Modifier.weight(1f))
+                    StatItem("Peligrosas", "$dangerousCount", Modifier.weight(1f))
+                    StatItem("Abiertas", "${networks.count { it.securityType == "ABIERTA" }}", Modifier.weight(1f))
+                }
+            }
+        }
+        
+        Spacer(Modifier.height(16.dp))
+        
+        // Lista de redes
+        Text(
+            text = "Redes WiFi detectadas",
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(Modifier.height(12.dp))
+        
+        networks.forEach { network ->
+            NearbyWifiNetworkCard(network)
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun DevicesTab(
+    devices: List<NetworkScanner.NetworkDevice>,
+    isScanning: Boolean
+) {
+    if (isScanning) {
+        LoadingCard("Escaneando dispositivos en la red local...")
+    } else if (devices.isEmpty()) {
+        EmptyNetworkCard()
+    } else {
         // Estadísticas
-        if (devices.isNotEmpty()) {
-            NetworkStatisticsCard(devices)
-            Spacer(Modifier.height(16.dp))
-        }
+        NetworkStatisticsCard(devices)
+        Spacer(Modifier.height(16.dp))
         
-        // Alertas de dispositivos nuevos o de alto riesgo
+        // Alertas de dispositivos críticos
         val criticalDevices = devices.filter { 
             it.riskLevel >= NetworkScanner.RiskLevel.HIGH || it.isNewDevice 
         }
@@ -177,33 +474,20 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
         }
         
         // Lista de dispositivos
-        if (devices.isEmpty() && !isScanning) {
-            EmptyNetworkCard()
-        } else {
-            Text(
-                text = "Dispositivos encontrados (${devices.size})",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(Modifier.height(12.dp))
-            
-            devices.forEach { device ->
-                NetworkDeviceCard(device)
-                Spacer(Modifier.height(8.dp))
-            }
+        Text(
+            text = "Dispositivos encontrados (${devices.size})",
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(Modifier.height(12.dp))
+        
+        devices.forEach { device ->
+            NetworkDeviceCard(device)
+            Spacer(Modifier.height(8.dp))
         }
         
-        // Footer informativo
         Spacer(Modifier.height(16.dp))
         TechnicalLimitationsNetworkCard()
-        
-        Spacer(Modifier.height(16.dp))
-        Button(
-            onClick = onBack,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Volver")
-        }
     }
 }
 
@@ -618,6 +902,279 @@ private fun NetworkDeviceCard(device: NetworkScanner.NetworkDevice) {
                     fontSize = 11.sp,
                     color = Color.Gray
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyNetworkCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(24.dp).fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("🔍", fontSize = 48.sp)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "No se encontraron dispositivos",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Asegúrate de estar conectado a una red Wi-Fi local",
+                fontSize = 13.sp,
+                color = Color.Gray,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+private fun LoadingCard(message: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = Color(0xFFFBBF24).copy(alpha = 0.15f)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(32.dp),
+                strokeWidth = 3.dp
+            )
+            Spacer(Modifier.width(16.dp))
+            Column {
+                Text(
+                    text = message,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp
+                )
+                Text(
+                    text = "Esto puede tardar unos segundos...",
+                    fontSize = 12.sp,
+                    color = Color.Gray
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyStateCard(icon: String, title: String, message: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(24.dp).fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(icon, fontSize = 48.sp)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = title,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = message,
+                fontSize = 13.sp,
+                color = Color.Gray,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+private fun NearbyWifiNetworkCard(network: com.guardianos.core.network.NetworkGuardian.NearbyWifiNetwork) {
+    val riskColor = when (network.riskLevel) {
+        "SEGURO" -> Color(0xFF10B981)
+        "PRECAUCIÓN" -> Color(0xFFFBBF24)
+        "PELIGROSO" -> Color(0xFFB3261E)
+        else -> Color.Gray
+    }
+    
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (network.isCurrentNetwork)
+                riskColor.copy(alpha = 0.20f)
+            else if (network.riskLevel == "PELIGROSO")
+                riskColor.copy(alpha = 0.10f)
+            else
+                MaterialTheme.colorScheme.surface
+        ),
+        border = if (network.isCurrentNetwork) BorderStroke(2.dp, riskColor) else null
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Header: SSID + Estado conectada
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Icono de señal
+                    Text(
+                        text = when (network.signalLevel) {
+                            4 -> "📶"
+                            3 -> "📶"
+                            2 -> "📡"
+                            1 -> "📉"
+                            else -> "📵"
+                        },
+                        fontSize = 24.sp
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = network.ssid,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                            if (network.isCurrentNetwork) {
+                                Spacer(Modifier.width(8.dp))
+                                Surface(
+                                    color = Color(0xFF10B981),
+                                    shape = MaterialTheme.shapes.small
+                                ) {
+                                    Text(
+                                        text = "CONECTADA",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = network.bssid,
+                            fontSize = 11.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
+                
+                // Badge de riesgo
+                Surface(
+                    color = riskColor,
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Text(
+                        text = network.riskLevel,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                    )
+                }
+            }
+            
+            Spacer(Modifier.height(8.dp))
+            Divider()
+            Spacer(Modifier.height(8.dp))
+            
+            // Seguridad + Señal
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Cifrado", fontSize = 11.sp, color = Color.Gray)
+                    Text(
+                        network.securityType,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (network.securityType in listOf("WPA3", "WPA2")) 
+                            Color(0xFF10B981) 
+                        else if (network.securityType == "ABIERTA")
+                            Color(0xFFB3261E)
+                        else
+                            Color(0xFFFBBF24)
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Señal", fontSize = 11.sp, color = Color.Gray)
+                    val signalQuality = when {
+                        network.signalStrength > -50 -> "Excelente"
+                        network.signalStrength > -60 -> "Buena"
+                        network.signalStrength > -70 -> "Media"
+                        network.signalStrength > -80 -> "Débil"
+                        else -> "Muy débil"
+                    }
+                    Text(
+                        "$signalQuality (${network.signalStrength} dBm)",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+            
+            Spacer(Modifier.height(8.dp))
+            
+            // Frecuencia + Canal
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Frecuencia", fontSize = 11.sp, color = Color.Gray)
+                    val band = if (network.frequency > 5000) "5 GHz" else "2.4 GHz"
+                    Text(
+                        "$band (${network.frequency} MHz)",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Canal", fontSize = 11.sp, color = Color.Gray)
+                    Text(
+                        network.channel.toString(),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            
+            // Advertencias
+            if (network.warnings.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "⚠️ Advertencias:",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = riskColor
+                )
+                network.warnings.take(3).forEach { warning ->
+                    Text(
+                        text = "• $warning",
+                        fontSize = 11.sp,
+                        color = riskColor.copy(alpha = 0.8f),
+                        modifier = Modifier.padding(start = 8.dp, top = 4.dp),
+                        lineHeight = 13.sp
+                    )
+                }
+                if (network.warnings.size > 3) {
+                    Text(
+                        text = "... y ${network.warnings.size - 3} más",
+                        fontSize = 10.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(start = 8.dp, top = 2.dp)
+                    )
+                }
             }
         }
     }

@@ -225,7 +225,14 @@ fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
                             Text(
                                 text = "• ${perm.substringAfterLast('.')}",
                                 fontSize = 11.sp,
+                                color = Color.Gray,
+                                modifier = Modifier.padding(start = 8.dp, top = 2.dp)
+                            )
+                        }
+                    }
+                }
             }
+        }
         }
         
         Spacer(Modifier.height(16.dp))
@@ -348,13 +355,6 @@ private fun StatColumn(label: String, value: String, color: Color = Color(0xFF5D
             text = label,
             fontSize = 11.sp,
             color = Color.Gray
-        )       }
-            }
-        }
-        
-        Spacer(Modifier.height(16.dp))
-        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text("Volver")
-        }
+        )
     }
 }
