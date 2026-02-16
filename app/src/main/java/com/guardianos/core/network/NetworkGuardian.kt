@@ -80,6 +80,8 @@ class NetworkGuardian(private val context: Context) {
      */
     fun getCurrentWifiInfo(): WifiNetworkInfo? {
         return try {
+            android.util.Log.d(TAG, "🔍 Iniciando getCurrentWifiInfo()...")
+            
             // Verificar permisos primero
             if (context.checkSelfPermission(android.Manifest.permission.ACCESS_WIFI_STATE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 android.util.Log.w(TAG, "⚠️ Permiso ACCESS_WIFI_STATE no otorgado")
@@ -90,26 +92,50 @@ class NetworkGuardian(private val context: Context) {
                 return null
             }
             
+            android.util.Log.d(TAG, "✅ Permisos WiFi verificados")
+            
             val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
-                ?: return null
+            if (wifiManager == null) {
+                android.util.Log.e(TAG, "❌ WifiManager es null")
+                return null
+            }
+            
+            android.util.Log.d(TAG, "WiFi enabled: ${wifiManager.isWifiEnabled}")
             
             val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val network = connectivityManager.activeNetwork ?: return null
-            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return null
+            val network = connectivityManager.activeNetwork
+            if (network == null) {
+                android.util.Log.w(TAG, "⚠️ Sin red activa")
+                return null
+            }
+            
+            val capabilities = connectivityManager.getNetworkCapabilities(network)
+            if (capabilities == null) {
+                android.util.Log.w(TAG, "⚠️ Capabilities es null")
+                return null
+            }
             
             // Verificar que es WiFi
             if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                android.util.Log.d(TAG, "No hay conexión WiFi activa")
+                android.util.Log.d(TAG, "No hay conexión WiFi activa (usando ${if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) "datos móviles" else "otra red"})")
                 return null
             }
+            
+            android.util.Log.d(TAG, "✅ Conectado a WiFi, obteniendo detalles...")
             
             val connectionInfo = wifiManager.connectionInfo
         val dhcpInfo = wifiManager.dhcpInfo
         
         // SSID (remover comillas)
         val ssid = connectionInfo.ssid.replace("\"", "")
+        android.util.Log.d(TAG, "SSID detectado: '$ssid'")
+        
         if (ssid == "<unknown ssid>") {
-            android.util.Log.w(TAG, "SSID desconocido - permisos insuficientes")
+            android.util.Log.w(TAG, "❌ SSID desconocido - La ubicación GPS del sistema está DESACTIVADA")
+            android.util.Log.w(TAG, "   En Android 9+, se requiere:")
+            android.util.Log.w(TAG, "   ✅ Permisos de ubicación (ya otorgados)")
+            android.util.Log.w(TAG, "   📍 GPS del sistema activado (FALTA)")
+            android.util.Log.w(TAG, "   → Ve a Configuración → Ubicación y actívala")
             return null
         }
         
@@ -575,6 +601,13 @@ class NetworkGuardian(private val context: Context) {
     /**
      * Escanea redes WiFi cercanas disponibles.
      * Requiere permisos: ACCESS_FINE_LOCATION, ACCESS_WIFI_STATE, CHANGE_WIFI_STATE
+     * 
+     * ⚠️ LIMITACIONES ANDROID 9+ (API 28+):
+     * - Throttling: Solo 4-5 escaneos cada 2 minutos por app en foreground
+     * - Background: Aún más restrictivo (cada 30 minutos aprox)
+     * - ColorOS/OPPO: Restricciones adicionales de batería pueden bloquear escaneos
+     * 
+     * SOLUCIÓN: Cache de resultados con timestamp, evitar escaneos repetitivos
      */
     data class NearbyWifiNetwork(
         val ssid: String,
@@ -590,9 +623,35 @@ class NetworkGuardian(private val context: Context) {
         val warnings: List<String>
     )
     
-    suspend fun scanNearbyWifiNetworks(): List<NearbyWifiNetwork> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    data class WifiScanResult(
+        val networks: List<NearbyWifiNetwork>,
+        val scanTimestamp: Long,
+        val wasThrottled: Boolean,
+        val errorMessage: String?
+    )
+    
+    // Cache de último escaneo WiFi (evitar throttling)
+    private var lastWifiScanResult: WifiScanResult? = null
+    private var lastWifiScanTime: Long = 0
+    
+    companion object {
+        private const val MIN_SCAN_INTERVAL_MS = 120_000L // 2 minutos (límite Android)
+    }
+    
+    /**
+     * Escanea redes WiFi con protección anti-throttling.
+     * Devuelve cache si el último escaneo fue hace menos de 2 minutos.
+     */
+    suspend fun scanNearbyWifiNetworks(forceRescan: Boolean = false): List<NearbyWifiNetwork> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         val networks = mutableListOf<NearbyWifiNetwork>()
+        val now = System.currentTimeMillis()
         
+        // ✅ ANTI-THROTTLING: Devolver cache si escaneo reciente
+        if (!forceRescan && lastWifiScanResult != null && (now - lastWifiScanTime) < MIN_SCAN_INTERVAL_MS) {
+            val cacheAge = (now - lastWifiScanTime) / 1000
+            android.util.Log.d(TAG, "📦 Usando cache de escaneo WiFi (${cacheAge}s antiguo)")
+            return@withContext lastWifiScanResult!!.networks
+        }        
         try {
             // Verificar permisos
             val hasLocationPermission = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
@@ -614,16 +673,30 @@ class NetworkGuardian(private val context: Context) {
                 return@withContext emptyList()
             }
             
-            // Iniciar escaneo
+            // Iniciar escaneo con protección anti-throttling
             android.util.Log.d(TAG, "🔍 Iniciando escaneo de redes WiFi cercanas...")
-            val scanSuccess = wifiManager.startScan()
+            
+            // Android 9+ puede denegar el escaneo (throttling)
+            val scanSuccess = try {
+                wifiManager.startScan()
+            } catch (e: SecurityException) {
+                android.util.Log.e(TAG, "❌ SecurityException: Sistema bloqueó el escaneo WiFi", e)
+                false
+            }
             
             if (!scanSuccess) {
-                android.util.Log.w(TAG, "⚠️ Fallo al iniciar escaneo WiFi")
+                android.util.Log.w(TAG, "⚠️ Escaneo WiFi bloqueado (probablemente throttling de Android)")
+                android.util.Log.w(TAG, "   Android limita escaneos a 4-5 veces cada 2 minutos")
+                
+                // Devolver cache si existe
+                if (lastWifiScanResult != null) {
+                    android.util.Log.d(TAG, "📦 Devolviendo último escaneo guardado")
+                    return@withContext lastWifiScanResult!!.networks
+                }
             }
             
             // Esperar un poco para que complete el escaneo
-            kotlinx.coroutines.delay(1500)
+            kotlinx.coroutines.delay(2000) // 2 segundos (algunos dispositivos necesitan más tiempo)
             
             // Obtener resultados
             val scanResults = wifiManager.scanResults
@@ -740,12 +813,43 @@ class NetworkGuardian(private val context: Context) {
             android.util.Log.d(TAG, "  Abiertas: ${networks.count { it.securityType == "ABIERTA" }}")
             android.util.Log.d(TAG, "═══════════════════════════════════════════")
             
+            // 💾 GUARDAR EN CACHE
+            lastWifiScanResult = WifiScanResult(
+                networks = networks,
+                scanTimestamp = now,
+                wasThrottled = !scanSuccess,
+                errorMessage = null
+            )
+            lastWifiScanTime = now
+            android.util.Log.d(TAG, "💾 Escaneo guardado en cache")
+            
         } catch (e: SecurityException) {
             android.util.Log.e(TAG, "❌ SecurityException en escaneo WiFi: ${e.message}")
+            // Devolver cache aunque sea antiguo si hay error de permisos
+            if (lastWifiScanResult != null) {
+                return@withContext lastWifiScanResult!!.networks
+            }
         } catch (e: Exception) {
             android.util.Log.e(TAG, "❌ Error escaneando redes WiFi: ${e.message}", e)
+            // Devolver cache en caso de error
+            if (lastWifiScanResult != null) {
+                return@withContext lastWifiScanResult!!.networks
+            }
         }
         
         return@withContext networks
+    }
+    
+    /**
+     * Obtiene timestamp del último escaneo WiFi exitoso.
+     */
+    fun getLastWifiScanTime(): Long = lastWifiScanTime
+    
+    /**
+     * Indica si el cache de WiFi es válido (menos de 2 minutos antiguo).
+     */
+    fun isWifiCacheValid(): Boolean {
+        val now = System.currentTimeMillis()
+        return lastWifiScanResult != null && (now - lastWifiScanTime) < MIN_SCAN_INTERVAL_MS
     }
 }

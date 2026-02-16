@@ -1,6 +1,9 @@
 package com.guardianos.core.pro.ui
 
 import android.content.Context
+import android.content.Intent
+import android.location.LocationManager
+import android.provider.Settings
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -34,16 +37,28 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
     var currentTab by remember { mutableStateOf(0) } // 0=Red actual, 1=Redes WiFi, 2=Dispositivos
     var needsLocationPermission by remember { mutableStateOf(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
+    var lastScanTime by remember { mutableStateOf(0L) }
     val scope = rememberCoroutineScope()
     
-    // Verificar permisos de ubicación
-    val hasLocationPermission = remember {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == 
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
+    // 🔍 Verificar si la ubicación GPS del sistema está activada
+    fun isLocationEnabled(context: Context): Boolean {
+        val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        return locationManager?.isLocationEnabled == true
+    }
+    
+    var systemLocationEnabled by remember { mutableStateOf(isLocationEnabled(context)) }
+    var showLocationDialog by remember { mutableStateOf(false) }
+    
+    // ✅ Verificar permisos de ubicación DINÁMICAMENTE
+    var hasLocationPermission by remember { 
+        mutableStateOf(
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == 
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            } else {
+                true
+            }
+        )
     }
     
     // Launcher para solicitar permisos
@@ -51,32 +66,66 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.values.all { it }
+        android.util.Log.d("NetworkAnalyzer", "🔑 Permisos otorgados: $permissions")
+        
         if (allGranted) {
+            hasLocationPermission = true
             needsLocationPermission = false
-            // Re-escanear después de otorgar permisos
+            
+            // ✅ Re-escanear INMEDIATAMENTE después de otorgar permisos
             scope.launch {
                 isScanning = true
+                scanError = null
+                android.util.Log.d("NetworkAnalyzer", "🔍 Iniciando escaneo tras otorgar permisos...")
+                
                 try {
                     val guardian = com.guardianos.core.network.NetworkGuardian(context)
-                    nearbyNetworks = guardian.scanNearbyWifiNetworks()
+                    wifiInfo = guardian.getCurrentWifiInfo()
+                    android.util.Log.d("NetworkAnalyzer", "📡 WiFi actual: ${wifiInfo?.ssid ?: "null"}")
+                    
+                    nearbyNetworks = guardian.scanNearbyWifiNetworks(forceRescan = true)
+                    lastScanTime = guardian.getLastWifiScanTime()
+                    android.util.Log.d("NetworkAnalyzer", "✅ Redes encontradas: ${nearbyNetworks.size}")
+                    
+                    devices = withContext(Dispatchers.IO) {
+                        NetworkScanner.scanLocalNetwork(context)
+                    }
+                    android.util.Log.d("NetworkAnalyzer", "✅ Dispositivos encontrados: ${devices.size}")
                 } catch (e: Exception) {
+                    android.util.Log.e("NetworkAnalyzer", "❌ Error al escanear", e)
                     scanError = "Error al escanear: ${e.message}"
                 }
                 isScanning = false
             }
         } else {
+            hasLocationPermission = false
             needsLocationPermission = true
+            android.util.Log.w("NetworkAnalyzer", "⚠️ Permisos denegados por el usuario")
         }
     }
     
     // Cargar dispositivos conocidos al inicio
     LaunchedEffect(Unit) {
         NetworkScanner.loadKnownDevices(context)
-        // Obtener información WiFi actual
+        
+        android.util.Log.d("NetworkAnalyzer", "👁️ Verificando estado inicial...")
+        android.util.Log.d("NetworkAnalyzer", "   Permisos ubicación: $hasLocationPermission")
+        android.util.Log.d("NetworkAnalyzer", "   GPS sistema activado: $systemLocationEnabled")
+        
+        // Actualizar estado de ubicación del sistema
+        systemLocationEnabled = isLocationEnabled(context)
+        
+        // Si tiene permisos pero la ubicación está desactivada, mostrar diálogo
+        if (hasLocationPermission && !systemLocationEnabled) {
+            showLocationDialog = true
+            android.util.Log.w("NetworkAnalyzer", "⚠️ Permisos OK pero GPS del sistema desactivado")
+        }
+        
+        // Obtener información WiFi actual (no requiere permisos de ubicación)
         val guardian = com.guardianos.core.network.NetworkGuardian(context)
         wifiInfo = guardian.getCurrentWifiInfo()
-        
-        // Escanear automáticamente al abrir
+        android.util.Log.d("NetworkAnalyzer", "   WiFi actual detectado: ${wifiInfo?.ssid ?: "Ninguno (requiere permisos)"}")        
+        // Escanear automáticamente al abrir (usa cache si está disponible)
         isScanning = true
         scanError = null
         
@@ -85,33 +134,101 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
             val networksJob = launch {
                 try {
                     if (hasLocationPermission) {
-                        nearbyNetworks = guardian.scanNearbyWifiNetworks()
+                        android.util.Log.d("NetworkAnalyzer", "🔍 Escaneando redes WiFi...")
+                        nearbyNetworks = guardian.scanNearbyWifiNetworks(forceRescan = false) // Usar cache
+                        lastScanTime = guardian.getLastWifiScanTime()
+                        android.util.Log.d("NetworkAnalyzer", "✅ Redes WiFi encontradas: ${nearbyNetworks.size}")
                     } else {
+                        android.util.Log.w("NetworkAnalyzer", "⚠️ Sin permisos de ubicación - saltando escaneo WiFi")
                         needsLocationPermission = true
                     }
                 } catch (e: Exception) {
-                    android.util.Log.e("NetworkAnalyzer", "Error escaneando redes WiFi", e)
-                    scanError = "Error al escanear redes WiFi"
+                    android.util.Log.e("NetworkAnalyzer", "❌ Error escaneando redes WiFi", e)
+                    scanError = if (e is SecurityException) {
+                        "Permisos insuficientes para escanear redes WiFi"
+                    } else {
+                        "Error al escanear redes WiFi: ${e.message}"
+                    }
                 }
             }
             val devicesJob = launch {
                 try {
+                    android.util.Log.d("NetworkAnalyzer", "🔍 Escaneando dispositivos locales...")
                     devices = withContext(Dispatchers.IO) {
                         NetworkScanner.scanLocalNetwork(context)
                     }
+                    android.util.Log.d("NetworkAnalyzer", "✅ Dispositivos encontrados: ${devices.size}")
                 } catch (e: Exception) {
-                    android.util.Log.e("NetworkAnalyzer", "Error escaneando dispositivos", e)
+                    android.util.Log.e("NetworkAnalyzer", "❌ Error escaneando dispositivos", e)
                 }
             }
             
             networksJob.join()
             devicesJob.join()
         } catch (e: Exception) {
-            android.util.Log.e("NetworkAnalyzer", "Error general en escaneo", e)
+            android.util.Log.e("NetworkAnalyzer", "❌ Error general en escaneo", e)
             scanError = "Error al realizar el escaneo"
         } finally {
             isScanning = false
+            android.util.Log.d("NetworkAnalyzer", "✅ Escaneo inicial completado")
         }
+    }
+    
+    // 📍 Diálogo para activar ubicación del sistema
+    if (showLocationDialog) {
+        AlertDialog(
+            onDismissRequest = { showLocationDialog = false },
+            icon = {
+                Text("📍", fontSize = 36.sp)
+            },
+            title = {
+                Text(
+                    "Ubicación Desactivada",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        "Para detectar el nombre (SSID) de las redes WiFi, Android 9+ requiere que:",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "✅ Permisos de ubicación (ya otorgados)",
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF4CAF50)
+                    )
+                    Text(
+                        "📍 Ubicación GPS activada en el sistema",
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFFFA726)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Activa la ubicación en Configuración para ver los SSIDs de las redes.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showLocationDialog = false
+                        val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+                        context.startActivity(intent)
+                    }
+                ) {
+                    Text("Abrir Configuración")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLocationDialog = false }) {
+                    Text("Más Tarde")
+                }
+            }
+        )
     }
     
     Column(
@@ -139,6 +256,17 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
                             isScanning = true
                             scanError = null
                             
+                            // Actualizar estado de ubicación del sistema
+                            systemLocationEnabled = isLocationEnabled(context)
+                            android.util.Log.d("NetworkAnalyzer", "🔍 Re-escaneo - GPS activado: $systemLocationEnabled")
+                            
+                            // Si la ubicación sigue desactivada, mostrar diálogo
+                            if (hasLocationPermission && !systemLocationEnabled) {
+                                showLocationDialog = true
+                                isScanning = false
+                                return@launch
+                            }
+                            
                             try {
                                 val guardian = com.guardianos.core.network.NetworkGuardian(context)
                                 wifiInfo = guardian.getCurrentWifiInfo()
@@ -146,7 +274,8 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
                                 val networksJob = launch {
                                     try {
                                         if (hasLocationPermission) {
-                                            nearbyNetworks = guardian.scanNearbyWifiNetworks()
+                                            nearbyNetworks = guardian.scanNearbyWifiNetworks(forceRescan = true)
+                                            lastScanTime = guardian.getLastWifiScanTime()
                                         } else {
                                             needsLocationPermission = true
                                         }
@@ -156,11 +285,14 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
                                 }
                                 val devicesJob = launch {
                                     try {
+                                        android.util.Log.d("NetworkAnalyzer", "🔍 Iniciando escaneo de dispositivos locales...")
                                         devices = withContext(Dispatchers.IO) {
                                             NetworkScanner.scanLocalNetwork(context)
                                         }
+                                        android.util.Log.d("NetworkAnalyzer", "✅ Dispositivos encontrados: ${devices.size}")
                                     } catch (e: Exception) {
-                                        android.util.Log.e("NetworkAnalyzer", "Error escaneando dispositivos", e)
+                                        android.util.Log.e("NetworkAnalyzer", "❌ Error escaneando dispositivos: ${e.message}", e)
+                                        e.printStackTrace()
                                     }
                                 }
                                 
@@ -182,21 +314,94 @@ fun NetworkAnalyzerScreen(onBack: () -> Unit) {
         
         Spacer(Modifier.height(8.dp))
         
-        // Descripción
+        // Tarjeta con limitaciones Android explicadas
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = Color(0xFF5D8BF4).copy(alpha = 0.15f)
             )
         ) {
-            Text(
-                text = "Análisis completo: red WiFi actual, redes cercanas disponibles y dispositivos conectados en tu red local.",
-                fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.padding(12.dp)
-            )
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "Análisis completo: red WiFi actual, redes cercanas disponibles y dispositivos conectados en tu red local.",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                
+                // Mostrar timestamp del último escaneo WiFi
+                if (lastScanTime > 0 && currentTab == 1) {
+                    Spacer(Modifier.height(8.dp))
+                    val minutesAgo = (System.currentTimeMillis() - lastScanTime) / 60000
+                    val timeText = when {
+                        minutesAgo < 1 -> "hace menos de 1 minuto"
+                        minutesAgo == 1L -> "hace 1 minuto"
+                        minutesAgo < 60 -> "hace $minutesAgo minutos"
+                        else -> {
+                            val hoursAgo = minutesAgo / 60
+                            "hace $hoursAgo ${if (hoursAgo == 1L) "hora" else "horas"}"
+                        }
+                    }
+                    Text(
+                        text = "⏰ Último escaneo WiFi: $timeText",
+                        fontSize = 11.sp,
+                        color = Color.Gray,
+                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                    )
+                    Text(
+                        text = "ℹ️ Android limita escaneos WiFi a 4-5 veces cada 2 minutos. Los resultados se almacenan en caché para evitar bloqueos del sistema.",
+                        fontSize = 10.sp,
+                        color = Color(0xFFFBBF24),
+                        lineHeight = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            }
         }
         
         Spacer(Modifier.height(16.dp))
+        
+        // 📍 Estado de ubicación del sistema
+        if (hasLocationPermission && !systemLocationEnabled) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFFFFA726).copy(alpha = 0.15f)
+                ),
+                border = BorderStroke(1.dp, Color(0xFFFFA726))
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("📍", fontSize = 24.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Ubicación GPS Desactivada",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = Color(0xFFF57C00)
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Los permisos de ubicación están otorgados, pero el GPS del sistema está desactivado. Esto impide detectar el SSID de las redes WiFi.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+                            context.startActivity(intent)
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFFFA726)
+                        )
+                    ) {
+                        Text("⚙️ Activar Ubicación")
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
         
         // Error de escaneo
         if (scanError != null) {
@@ -1176,37 +1381,6 @@ private fun NearbyWifiNetworkCard(network: com.guardianos.core.network.NetworkGu
                     )
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun EmptyNetworkCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(24.dp).fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text("🔍", fontSize = 48.sp)
-            Spacer(Modifier.height(12.dp))
-            Text(
-                text = "No se encontraron dispositivos",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "Asegúrate de estar conectado a una red Wi-Fi local",
-                fontSize = 13.sp,
-                color = Color.Gray,
-                textAlign = TextAlign.Center
-            )
         }
     }
 }

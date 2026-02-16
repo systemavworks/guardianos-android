@@ -12,6 +12,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardianos.core.pro.media.MediaAccessScanner
+import com.guardianos.core.pro.media.MediaStoreAnalyzer
+import com.guardianos.core.crash.DeviceOptimizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -23,18 +25,39 @@ fun MediaAccessScreen(context: android.content.Context, onBack: () -> Unit) {
     var isLoading by remember { mutableStateOf(true) }
     var appsInfo by remember { mutableStateOf<List<MediaAccessScanner.MediaAccessInfo>>(emptyList()) }
     var privacyReport by remember { mutableStateOf<MediaAccessScanner.MediaPrivacyReport?>(null) }
+    var recentActivity by remember { mutableStateOf<List<MediaStoreAnalyzer.AppMediaActivity>>(emptyList()) }
+    var deviceProfile by remember { mutableStateOf<DeviceOptimizer.DeviceProfile?>(null) }
     val scope = rememberCoroutineScope()
     
     // Cargar información al abrir
     LaunchedEffect(Unit) {
         scope.launch {
             isLoading = true
+            
+            // Analizar dispositivo para ajustar optimizaciones
+            deviceProfile = withContext(Dispatchers.IO) {
+                DeviceOptimizer.analyzeDevice(context)
+            }
+            
+            // Análisis de permisos
             appsInfo = withContext(Dispatchers.IO) {
                 MediaAccessScanner.getDetailedMediaAccessInfo(context)
             }
             privacyReport = withContext(Dispatchers.IO) {
                 MediaAccessScanner.generatePrivacyReport(context)
             }
+            
+            // Análisis de accesos reales (con protección anti-crash)
+            try {
+                android.util.Log.d("MediaAccessScreen", "🔍 Iniciando análisis de accesos multimedia reales...")
+                recentActivity = withContext(Dispatchers.IO) {
+                    MediaStoreAnalyzer.analyzeRecentMediaAccess(context, daysBack = 7)
+                }
+                android.util.Log.d("MediaAccessScreen", "✅ Análisis completado: ${recentActivity.size} apps con actividad")
+            } catch (e: Exception) {
+                android.util.Log.e("MediaAccessScreen", "❌ Error en MediaStore", e)
+            }
+            
             isLoading = false
         }
     }

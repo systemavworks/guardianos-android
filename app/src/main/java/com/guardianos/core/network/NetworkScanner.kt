@@ -67,27 +67,49 @@ object NetworkScanner {
      * Escanea la red local completa y devuelve todos los dispositivos encontrados
      */
     suspend fun scanLocalNetwork(context: Context): List<NetworkDevice> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "🔍 Iniciando scanLocalNetwork()...")
         val devices = mutableListOf<NetworkDevice>()
         
-        // 1. Leer tabla ARP (/proc/net/arp)
-        val arpDevices = readArpTable()
+        try {
+            // 1. Obtener rango de red local
+            val networkPrefix = getLocalNetworkPrefix(context)
+            Log.d(TAG, "📡 Prefijo de red detectado: $networkPrefix.0/24")
+            
+            // 2. Intentar leer tabla ARP primero
+            Log.d(TAG, "📂 Intentando leer tabla ARP...")
+            var arpDevices = readArpTable()
+            Log.d(TAG, "✅ Tabla ARP leída: ${arpDevices.size} entradas")
+            
+            // 3. Si ARP está vacío (Android 10+), usar escaneo por Ping
+            if (arpDevices.isEmpty()) {
+                Log.w(TAG, "⚠️ Tabla ARP vacía o inaccesible (Android 10+ restricción)")
+                Log.d(TAG, "🔄 Iniciando escaneo alternativo por PING...")
+                arpDevices = scanNetworkByPing(networkPrefix)
+                Log.d(TAG, "✅ Escaneo por Ping completado: ${arpDevices.size} dispositivos")
+            }
+            
+            Log.d(TAG, "═══════════════════════════════════════════")
+            Log.d(TAG, "Iniciando escaneo de red local: $networkPrefix.0/24")
+            Log.d(TAG, "Dispositivos detectados: ${arpDevices.size}")
         
-        // 2. Obtener rango de red local
-        val networkPrefix = getLocalNetworkPrefix(context)
-        
-        Log.d(TAG, "═══════════════════════════════════════════")
-        Log.d(TAG, "Iniciando escaneo de red local: $networkPrefix.0/24")
-        Log.d(TAG, "Dispositivos en tabla ARP: ${arpDevices.size}")
-        
-        // 3. Para cada dispositivo en ARP, obtener información detallada
-        arpDevices.forEach { (ip, mac) ->
+        // 3. Para cada dispositivo detectado, obtener información detallada
+        arpDevices.forEachIndexed { index, (ip, mac) ->
             try {
-                // Verificar si está activo (ping)
-                val isActive = pingDevice(ip)
+                Log.d(TAG, "🔍 Analizando ${index + 1}/${arpDevices.size}: $ip")
+                
+                // Verificar si está activo (ping) - solo si viene de ARP, si viene de ping scan ya está activo
+                val isActive = if (mac.startsWith("02:00:00:00")) true else pingDevice(ip)
+                
+                if (!isActive) {
+                    Log.d(TAG, "⚠️ $ip no responde (inactivo)")
+                    return@forEachIndexed
+                }
                 
                 // Obtener hostname
                 val hostname = try {
-                    InetAddress.getByName(ip).canonicalHostName
+                    withTimeout(2000) {
+                        InetAddress.getByName(ip).canonicalHostName
+                    }
                 } catch (e: Exception) {
                     null
                 }
@@ -95,8 +117,13 @@ object NetworkScanner {
                 // Identificar fabricante por MAC
                 val manufacturer = getManufacturerFromMac(mac)
                 
-                // Escanear puertos comunes
-                val openPorts = if (isActive) scanCommonPorts(ip) else emptyList()
+                // Escanear solo puertos críticos para no demorar (reducido de 14 a 6 puertos)
+                val criticalPorts = listOf(22, 23, 80, 443, 445, 3389)
+                val openPorts = if (isActive) {
+                    scanSpecificPorts(ip, criticalPorts)
+                } else {
+                    emptyList()
+                }
                 
                 // Categorizar tipo de dispositivo
                 val deviceType = categorizeDevice(hostname, manufacturer, openPorts)
@@ -132,16 +159,86 @@ object NetworkScanner {
             }
         }
         
-        Log.d(TAG, "═══════════════════════════════════════════")
-        Log.d(TAG, "Escaneo completado: ${devices.size} dispositivos encontrados")
-        Log.d(TAG, "  - Activos: ${devices.count { it.isActive }}")
-        Log.d(TAG, "  - Nuevos: ${devices.count { it.isNewDevice }}")
-        Log.d(TAG, "  - Riesgo Alto/Crítico: ${devices.count { it.riskLevel >= RiskLevel.HIGH }}")
+            Log.d(TAG, "═══════════════════════════════════════════")
+            Log.d(TAG, "Escaneo completado: ${devices.size} dispositivos encontrados")
+            Log.d(TAG, "  - Activos: ${devices.count { it.isActive }}")
+            Log.d(TAG, "  - Nuevos: ${devices.count { it.isNewDevice }}")
+            Log.d(TAG, "  - Riesgo Alto/Crítico: ${devices.count { it.riskLevel >= RiskLevel.HIGH }}")
+            
+            // Guardar historial en SharedPreferences
+            saveKnownDevices(context)
+            
+            return@withContext devices.sortedByDescending { it.riskLevel }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error fatal en scanLocalNetwork: ${e.message}", e)
+            return@withContext emptyList()
+        }
+    }
+    
+    /**
+     * Escanea la red local mediante Ping (alternativa a ARP para Android 10+)
+     * Escaneo optimizado: primero IPs comunes (1, 254, 100-150), luego el resto
+     */
+    private suspend fun scanNetworkByPing(networkPrefix: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+        val devices = mutableListOf<Pair<String, String>>()
         
-        // Guardar historial en SharedPreferences
-        saveKnownDevices(context)
+        // Priorizar IPs comunes (routers y dispositivos típicos)
+        val priorityIPs = listOf(1, 254, 100, 101, 102, 103, 104, 105, 110, 120, 150, 200, 253)
+        val remainingIPs = (2..253).filterNot { it in priorityIPs }
         
-        devices.sortedByDescending { it.riskLevel }
+        val allIPs = priorityIPs + remainingIPs
+        
+        Log.d(TAG, "🔍 Escaneando rango: $networkPrefix.1-254")
+        Log.d(TAG, "⚡ Modo optimizado: primero IPs prioritarias")
+        Log.d(TAG, "⏱️ Tiempo estimado: 10-20 segundos...")
+        
+        // Escanear en bloques de 40 IPs en paralelo
+        val chunks = allIPs.chunked(40)
+        for (chunkIndex in chunks.indices) {
+            val chunk = chunks[chunkIndex]
+            
+            val jobs = chunk.map { lastOctet ->
+                async {
+                    try {
+                        val ip = "$networkPrefix.$lastOctet"
+                        val address = InetAddress.getByName(ip)
+                        
+                        // Ping con timeout reducido a 400ms
+                        if (address.isReachable(400)) {
+                            // MAC sintética basada en IP
+                            val syntheticMac = String.format(
+                                "02:00:00:00:%02X:%02X",
+                                lastOctet / 256,
+                                lastOctet % 256
+                            )
+                            Pair(ip, syntheticMac)
+                        } else {
+                            null
+                        }
+                    } catch (e: Exception) {
+                        null
+                    }
+                }
+            }
+            
+            // Recopilar resultados del chunk
+            jobs.awaitAll().filterNotNull().forEach { devices.add(it) }
+            
+            // Log de progreso cada 2 chunks
+            if (chunkIndex % 2 == 0) {
+                val progress = ((chunkIndex + 1) * 40 * 100) / allIPs.size
+                Log.d(TAG, "📊 Progreso: $progress% - ${devices.size} dispositivos encontrados")
+            }
+            
+            // Detener si ya encontramos suficientes dispositivos (optimización)
+            if (devices.size >= 30) {
+                Log.d(TAG, "✅ Límite de 30 dispositivos alcanzado, finalizando escaneo temprano")
+                break
+            }
+        }
+        
+        return@withContext devices
     }
     
     /**
@@ -152,8 +249,17 @@ object NetworkScanner {
         
         try {
             val arpFile = File("/proc/net/arp")
+            Log.d(TAG, "📂 Verificando archivo ARP: ${arpFile.absolutePath}")
+            Log.d(TAG, "   Existe: ${arpFile.exists()}")
+            Log.d(TAG, "   Legible: ${arpFile.canRead()}")
+            
             if (!arpFile.exists()) {
-                Log.e(TAG, "Archivo /proc/net/arp no existe")
+                Log.d(TAG, "ℹ️ Archivo /proc/net/arp no existe")
+                return emptyList()
+            }
+            
+            if (!arpFile.canRead()) {
+                Log.d(TAG, "ℹ️ Sin permisos para leer /proc/net/arp (Android 10+)")
                 return emptyList()
             }
             
@@ -223,7 +329,7 @@ object NetworkScanner {
     /**
      * Escanea puertos comunes (TCP)
      */
-    private suspend fun scanCommonPorts(ip: String): List<Int> = withContext(Dispatchers.IO) {
+    private suspend fun scanCommonPorts(ip: String): List<Int> {
         val commonPorts = listOf(
             22,    // SSH
             23,    // Telnet
@@ -241,15 +347,22 @@ object NetworkScanner {
             9000   // PHP-FPM
         )
         
+        return scanSpecificPorts(ip, commonPorts)
+    }
+    
+    /**
+     * Escanea una lista específica de puertos (optimizado)
+     */
+    private suspend fun scanSpecificPorts(ip: String, ports: List<Int>): List<Int> = withContext(Dispatchers.IO) {
         val openPorts = mutableListOf<Int>()
         
         // Escanear en paralelo con timeout corto
-        val jobs = commonPorts.map { port ->
+        val jobs = ports.map { port ->
             async {
                 try {
-                    withTimeout(500) { // 500ms timeout por puerto
+                    withTimeout(400) { // 400ms timeout por puerto
                         val socket = Socket()
-                        socket.connect(java.net.InetSocketAddress(ip, port), 500)
+                        socket.connect(java.net.InetSocketAddress(ip, port), 400)
                         socket.close()
                         port
                     }
@@ -269,6 +382,11 @@ object NetworkScanner {
      */
     private fun getManufacturerFromMac(mac: String): String {
         if (mac.length < 8) return "Desconocido"
+        
+        // Detectar MACs sintéticas (generadas por ping scan)
+        if (mac.startsWith("02:00:00:00")) {
+            return "Detectado por Ping"
+        }
         
         // Obtener OUI (primeros 3 bytes: 6 caracteres hex)
         val oui = mac.substring(0, 8).replace(":", "").uppercase()

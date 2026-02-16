@@ -35,6 +35,8 @@ import com.guardianos.core.pdf.ItextPDFGenerator
 import com.guardianos.core.pro.PrivacyAnalyzer
 import com.guardianos.core.pro.ProActivationManager
 import com.guardianos.core.pro.ScanHistory
+import com.guardianos.core.pro.media.MediaAccessScanner
+import com.guardianos.core.pro.media.MediaStoreAnalyzer
 import com.guardianos.core.pro.ui.ProFeatureCTA
 import com.guardianos.core.pro.ui.NetworkAnalyzerScreen
 import com.guardianos.core.pro.ui.MediaAccessScreen
@@ -48,6 +50,7 @@ import com.guardianos.vault.ui.VaultUnlockScreen
 import com.guardianos.vault.ui.FamilyVaultMainScreen
 import com.guardianos.vault.security.VaultSecurityManager
 import com.guardianos.core.crash.CrashHandler
+import com.guardianos.core.crash.DeviceOptimizer
 import com.guardianos.core.network.DNSFixer
 import com.guardianos.core.ui.DiagnosticsScreen
 import android.app.KeyguardManager
