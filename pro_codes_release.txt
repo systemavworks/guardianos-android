@@ -1,0 +1,30 @@
+🔑 Generando 20 códigos simples...
+
+  1. GUAR-1100-4207-5307
+  2. GUAR-7050-1750-8800
+  3. GUAR-1373-1914-3287
+  4. GUAR-6084-1660-7744
+  5. GUAR-9983-1811-1794
+  6. GUAR-6591-8412-5003
+  7. GUAR-3656-5487-9143
+  8. GUAR-3557-2420-5977
+  9. GUAR-9512-9375-8887
+  10. GUAR-8389-5779-4168
+  11. GUAR-2480-4806-7286
+  12. GUAR-8083-7060-5143
+  13. GUAR-3849-8571-2420
+  14. GUAR-7329-5596-2925
+  15. GUAR-2891-4632-7523
+  16. GUAR-3074-4136-7210
+  17. GUAR-2519-5487-8006
+  18. GUAR-9287-1045-0332
+  19. GUAR-4864-7580-2444
+  20. GUAR-4702-8617-3319
+
+✅ Códigos guardados en: pro_codes.txt
+
+📖 Instrucciones de uso:
+   1. Abre GuardianOS en el dispositivo Android
+   2. Ve a la pantalla de activación PRO
+   3. Ingresa el código generado
+   4. ¡Disfruta de todas las funciones PRO!

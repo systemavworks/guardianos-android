@@ -31,11 +31,17 @@ fun ConsultingScreen(context: android.content.Context, pdfPath: String, onBack: 
     var recentPdf by remember { mutableStateOf<File?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     
-    // Buscar PDFs automáticamente al cargar la pantalla
-    LaunchedEffect(Unit) {
+    // Buscar PDFs automáticamente al cargar la pantalla y cuando cambie pdfPath
+    LaunchedEffect(pdfPath) {
         scope.launch {
             recentPdf = withContext(Dispatchers.IO) {
-                findMostRecentPDF(context)
+                // Priorizar pdfPath si existe, sino buscar el más reciente
+                if (pdfPath.isNotEmpty()) {
+                    val file = File(pdfPath)
+                    if (file.exists()) file else findMostRecentPDF(context)
+                } else {
+                    findMostRecentPDF(context)
+                }
             }
             isLoading = false
         }

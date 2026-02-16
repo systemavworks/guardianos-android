@@ -38,11 +38,16 @@ local.properties
 # API Keys y secretos (CRÍTICO)
 **/apikeys.properties
 **/secrets.properties
+keystore.properties
 google-services.json
 firebase.json
 
 # Backups
 *-backup-*/
+backup-release-*/
+backup-release-*.tar.gz
+BACKUP_INFO.txt
+fdroid-backup-*/
 *.BAK
 *.bak
 *.backup
