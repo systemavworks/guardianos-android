@@ -18,8 +18,41 @@
 
 package com.guardianos.core
 
+import com.guardianos.core.BuildConfig
 import com.guardianos.core.audit.AppAuditor
+import com.guardianos.core.audit.ISOAuditor
+import com.guardianos.core.domain.model.ISOViolation
+import com.guardianos.core.audit.detector.StalkerwareDetector
+import com.guardianos.core.monitor.GuardianShieldMonitor
+import com.guardianos.core.monitor.GuardianShieldService
+import com.guardianos.core.monitor.PermissionAccessInfo
+import com.guardianos.core.monitor.RealTimePermissionMonitor
+import com.guardianos.core.monitor.ui.PermissionTransparencyDashboard
+import com.guardianos.core.network.NetworkGuardian
 import com.guardianos.core.data.MalwareDatabase
+import com.guardianos.core.pdf.PDFGenerator
+import com.guardianos.core.pdf.ItextPDFGenerator
+import com.guardianos.core.pro.PrivacyAnalyzer
+import com.guardianos.core.pro.ProActivationManager
+import com.guardianos.core.pro.ScanHistory
+import com.guardianos.core.pro.media.MediaAccessScanner
+import com.guardianos.core.pro.media.MediaStoreAnalyzer
+import com.guardianos.core.pro.ui.ProFeatureCTA
+import com.guardianos.core.pro.ui.NetworkAnalyzerScreen
+import com.guardianos.core.pro.ui.MediaAccessScreen
+import com.guardianos.core.pro.ui.ForensicReportScreen
+import com.guardianos.core.pro.ui.PrivacyProactiveScreen
+import com.guardianos.core.pro.ui.ConsultingScreen
+import com.guardianos.core.pro.ui.ScanHistoryScreen
+import com.guardianos.core.pro.ui.StalkerwareScreen
+import com.guardianos.vault.ui.MasterPasswordSetupScreen
+import com.guardianos.vault.ui.VaultUnlockScreen
+import com.guardianos.vault.ui.FamilyVaultMainScreen
+import com.guardianos.vault.security.VaultSecurityManager
+import com.guardianos.core.crash.CrashHandler
+import com.guardianos.core.crash.DeviceOptimizer
+import com.guardianos.core.network.DNSFixer
+import com.guardianos.core.ui.DiagnosticsScreen
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
@@ -32,24 +65,34 @@ import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -70,1299 +113,4239 @@ class MainActivity : ComponentActivity() {
     private val malwareSignatures = MalwareDatabase()
     private val appAuditor = AppAuditor()
 
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val APP_VERSION = "2.0.0"
+        private const val DEVELOPER_NAME = "Victor Shift Lara"
+        private const val DEVELOPER_EMAIL = "info@guardianos.es"
+        private const val WEB_URL = "https://guardianos.es"
+        private const val LICENSE = "GNU General Public License v3.0"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // ⚠️ PRIORIDAD P0: Estabilización antes de features
+        // 1. Crash handler minimalista (sin trackers)
+        CrashHandler.initialize(this)
+        
+        // 2. Workaround DNS para OPPO A80 y similares
+        DNSFixer.applyWorkaroundIfNeeded(this)
+        
+        Log.i(TAG, "✅ GuardianOS ${APP_VERSION} inicializado (crash handler + DNS workaround activos)")
+        
         setContent { GuardianOSApp() }
     }
 
+    /**
+     * Verifica si la versión PRO está activada.
+     */
+    private fun isProActivated(context: Context): Boolean {
+        return ProActivationManager.isProActivated(context)
+    }
+
+    /**
+     * Guarda el estado de activación PRO.
+     */
+    private fun saveActivationState(context: Context, activated: Boolean, code: String) {
+        ProActivationManager.saveActivationState(context, activated, code)
+    }
+
+    /**
+     * Valida si el código de activación Pro es válido.
+     * Soporta dos formatos:
+     * 1. Firma digital RSA: GUAR-[DATA]-[SIGNATURE] (más seguro)
+     * 2. Simple: GUAR-XXXX-XXXX-XXXX (fallback)
+     */
+    private fun validateActivationCode(code: String): Boolean {
+        return try {
+            // Intentar validación con firma digital primero
+            if (ProActivationManager.validateActivationCode(code, "")) {
+                return true
+            }
+            
+            // Fallback: validación simple
+            ProActivationManager.validateSimpleCode(code)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error validating activation code", e)
+            false
+        }
+    }
+
     /* ────────────────────────── UI ────────────────────────── */
+
+    // Family Document Vault: UI y lógica básica
+    @Composable
+    fun DocumentVaultScreen(context: Context, onBack: () -> Unit) {
+        var password by remember { mutableStateOf("") }
+        var docName by remember { mutableStateOf("") }
+        var docType by remember { mutableStateOf(com.guardianos.vault.data.DocumentType.DNI) }
+        var selectedFileName by remember { mutableStateOf<String?>(null) }
+        var fileBytes by remember { mutableStateOf<ByteArray?>(null) }
+        var docs by remember { mutableStateOf(listOf<com.guardianos.vault.data.FamilyDocument>()) }
+        var error by remember { mutableStateOf("") }
+        var showConsent by remember { mutableStateOf(false) }
+        
+        val filePickerLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.GetContent()
+        ) { uri: Uri? ->
+            Log.d(TAG, "File picker callback: uri=$uri")
+            uri?.let {
+                try {
+                    Log.d(TAG, "Intentando leer archivo desde URI: $it")
+                    val inputStream = context.contentResolver.openInputStream(it)
+                    fileBytes = inputStream?.readBytes()
+                    inputStream?.close()
+                    
+                    // Obtener nombre del archivo
+                    val cursor = context.contentResolver.query(it, null, null, null, null)
+                    cursor?.use { c ->
+                        if (c.moveToFirst()) {
+                            val nameIndex = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (nameIndex >= 0) {
+                                selectedFileName = c.getString(nameIndex)
+                                Log.d(TAG, "Nombre archivo seleccionado: $selectedFileName, tamaño: ${fileBytes?.size} bytes")
+                            }
+                        }
+                    }
+                    
+                    if (selectedFileName == null) {
+                        selectedFileName = "documento_${System.currentTimeMillis()}"
+                    }
+                    
+                    error = ""
+                    Toast.makeText(context, "✓ Archivo cargado: $selectedFileName", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    error = "Error al leer archivo: ${e.localizedMessage}"
+                    Log.e(TAG, "Error reading file", e)
+                    Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                }
+            } ?: run {
+                Log.w(TAG, "File picker retornó URI nulo - usuario canceló o error de permisos")
+                Toast.makeText(context, "No se seleccionó ningún archivo", Toast.LENGTH_SHORT).show()
+            }
+        }
+        
+        Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+            Text("📁 Bóveda de Documentos", fontWeight = FontWeight.Bold, fontSize = 22.sp)
+            Spacer(Modifier.height(8.dp))
+            
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "🔒 Cifrado AES-256-GCM local",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF10B981)
+                    )
+                    Text(
+                        text = "Tus documentos nunca salen de tu dispositivo. Todo se cifra localmente.",
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Contraseña de Vault") },
+                modifier = Modifier.fillMaxWidth(),
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                singleLine = true
+            )
+            
+            Button(
+                onClick = {
+                    try {
+                        docs = com.guardianos.core.pro.DocumentVault.loadDocuments(context)
+                        error = if (docs.isEmpty()) {
+                            "📂 Vault vacío. Agrega documentos abajo."
+                        } else {
+                            "✅ ${docs.size} documentos cargados. La contraseña se usa para guardar/abrir archivos."
+                        }
+                    } catch (e: Exception) {
+                        error = "Error al cargar: ${e.localizedMessage}"
+                        Log.e(TAG, "Error loading documents", e)
+                    }
+                },
+                modifier = Modifier.padding(top = 8.dp).fillMaxWidth()
+            ) {
+                Text("📂 Ver Documentos Guardados")
+            }
+            
+            if (error.isNotEmpty()) {
+                Text(
+                    text = error,
+                    color = when {
+                        error.startsWith("✅") -> Color(0xFF10B981)
+                        error.startsWith("📂") -> MaterialTheme.colorScheme.onSurfaceVariant
+                        else -> MaterialTheme.colorScheme.error
+                    },
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+            
+            Spacer(Modifier.height(24.dp))
+            
+            // Agregar nuevo documento
+            Text("➕ Agregar Nuevo Documento", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Spacer(Modifier.height(12.dp))
+            
+            OutlinedTextField(
+                value = docName,
+                onValueChange = { docName = it },
+                label = { Text("Nombre (ej: DNI Juan)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            
+            Spacer(Modifier.height(8.dp))
+            
+            // Selector de tipo de documento
+            Text("Tipo de documento:", fontSize = 14.sp, color = Color.Gray)
+            Spacer(Modifier.height(4.dp))
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    com.guardianos.vault.data.DocumentType.DNI to "🪪 DNI",
+                    com.guardianos.vault.data.DocumentType.PASSPORT to "🛂 Pasaporte",
+                    com.guardianos.vault.data.DocumentType.HEALTH_CARD to "🏥 Seguro",
+                    com.guardianos.vault.data.DocumentType.OTHER to "📄 Otro"
+                ).forEach { (type, label) ->
+                    Button(
+                        onClick = { docType = type },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (docType == type) 
+                                MaterialTheme.colorScheme.secondary 
+                            else 
+                                MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(label, fontSize = 10.sp)
+                    }
+                }
+            }
+            
+            Spacer(Modifier.height(12.dp))
+            
+            // Botón para seleccionar archivo
+            Button(
+                onClick = { 
+                    if (password.isBlank()) {
+                        error = "❌ Configura una contraseña primero"
+                        Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+                    } else {
+                        Log.d(TAG, "Lanzando file picker...")
+                        try {
+                            filePickerLauncher.launch("*/*")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error al lanzar file picker", e)
+                            Toast.makeText(context, "Error al abrir selector de archivos: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (selectedFileName != null) 
+                        Color(0xFF10B981) 
+                    else 
+                        MaterialTheme.colorScheme.primary
+                )
+            ) {
+                Text(
+                    if (selectedFileName != null) 
+                        "📎 Archivo: $selectedFileName" 
+                    else 
+                        "📎 Seleccionar archivo"
+                )
+            }
+            
+            Spacer(Modifier.height(8.dp))
+            
+            // Botón guardar
+            Button(
+                onClick = { 
+                    when {
+                        password.isBlank() -> error = "❌ Configura una contraseña"
+                        docName.isBlank() -> error = "❌ Ingresa un nombre"
+                        fileBytes == null -> error = "❌ Selecciona un archivo"
+                        else -> showConsent = true
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = password.isNotBlank() && docName.isNotBlank() && fileBytes != null,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF10B981)
+                )
+            ) {
+                Text("💾 Guardar Documento Cifrado")
+            }
+            
+            if (showConsent) {
+                AlertDialog(
+                    onDismissRequest = { showConsent = false },
+                    title = { Text("⚠️ Consentimiento Legal") },
+                    text = {
+                        Text(
+                            "Vas a guardar un documento oficial (DNI, pasaporte, etc.) cifrado en tu dispositivo.\n\n" +
+                            "✅ GuardianOS NUNCA subirá este archivo a la nube.\n" +
+                            "✅ El cifrado es irreversible sin tu contraseña.\n" +
+                            "✅ Eres responsable de su custodia.\n\n" +
+                            "¿Confirmas guardar el documento?"
+                        )
+                    },
+                    confirmButton = {
+                        Button(onClick = {
+                            val doc = com.guardianos.vault.data.FamilyDocument(
+                                id = java.util.UUID.randomUUID(),
+                                name = docName,
+                                type = docType,
+                                encryptedFilePath = ""
+                            )
+                            
+                            val result = com.guardianos.core.pro.DocumentVault.saveDocument(
+                                context,
+                                doc,
+                                fileBytes!!,
+                                password
+                            )
+                            
+                            result.onSuccess {
+                                docs = com.guardianos.core.pro.DocumentVault.loadDocuments(context)
+                                docName = ""
+                                selectedFileName = null
+                                fileBytes = null
+                                error = "✅ Documento cifrado y guardado correctamente"
+                                showConsent = false
+                                Toast.makeText(context, "✅ Documento guardado", Toast.LENGTH_SHORT).show()
+                            }.onFailure { e ->
+                                error = "❌ Error al guardar: ${e.localizedMessage}"
+                                showConsent = false
+                                Log.e(TAG, "Error saving document", e)
+                            }
+                        }) {
+                            Text("✅ Aceptar y Guardar")
+                        }
+                    },
+                    dismissButton = {
+                        Button(onClick = { showConsent = false }) {
+                            Text("❌ Cancelar")
+                        }
+                    }
+                )
+            }
+            
+            Spacer(Modifier.height(24.dp))
+            
+            // Lista de documentos
+            if (docs.isNotEmpty()) {
+                Text("📋 Documentos Guardados (${docs.size}):", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Spacer(Modifier.height(12.dp))
+                
+                docs.forEach { doc ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val icon = when (doc.type) {
+                                com.guardianos.vault.data.DocumentType.DNI -> "🪪"
+                                com.guardianos.vault.data.DocumentType.PASSPORT -> "🛂"
+                                com.guardianos.vault.data.DocumentType.HEALTH_CARD -> "🏥"
+                                else -> "📄"
+                            }
+                            Text(icon, fontSize = 24.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(doc.name, fontWeight = FontWeight.Bold)
+                                Text("Tipo: ${doc.type}", fontSize = 12.sp, color = Color.Gray)
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            
+            Button(
+                onClick = onBack,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF6B7280)
+                )
+            ) {
+                Text("Volver")
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     fun GuardianOSApp() {
         val context = LocalContext.current
         val scope = rememberCoroutineScope()
-        var loading by remember { mutableStateOf(false) }
-        var auditMode by remember { mutableStateOf(AuditMode.QUICK) }
-        var systemFindings by remember { mutableStateOf<List<AuditFinding>>(emptyList()) }
-        var apps by remember { mutableStateOf<List<AppAudit>>(emptyList()) }
-        var selectedApp by remember { mutableStateOf<AppAudit?>(null) }
-        var deviceInfo by remember { mutableStateOf<DeviceInfo?>(null) }
-        var showAboutDialog by remember { mutableStateOf(false) } // 👈 Estado del diálogo
+        
+        var currentScreen by remember { mutableStateOf("home") }
+        var scanResults by remember { mutableStateOf<List<AppScanResult>>(emptyList()) }
+        var isScanning by remember { mutableStateOf(false) }
+        var pdfPath by remember { mutableStateOf("") }
+        val isPro = remember { mutableStateOf(isProActivated(context)) }
 
+        // Estados adicionales requeridos por pantallas PRO
+        var isMonitoring by remember { mutableStateOf(false) }
+        var isAnalyzingISO by remember { mutableStateOf(false) }
+        var isoResults by remember { mutableStateOf<List<ISOViolation>>(emptyList()) }
+        var networkStats by remember { mutableStateOf<NetworkStats?>(null) }
+        var connections by remember { mutableStateOf<List<com.guardianos.core.domain.model.NetworkConnection>>(emptyList()) }
+        
+        // Monitor de permisos en tiempo real (Transparencia Radical)
+        val permissionMonitor = remember { RealTimePermissionMonitor(context) }
+        
+        // Cleanup cuando se destruye el composable
+        DisposableEffect(Unit) {
+            onDispose {
+                permissionMonitor.stopMonitoring()
+            }
+        }
+        
+        // Paleta "Cyber Ethics" - diseño ético sin alarmismo
+        // Indicadores de privacidad:
+        // - Verde esmeralda (#4CAF50): Cifrado/procesamiento local verificado
+        // - Amarillo ético (#FBBF24): Advertencia sin pánico
+        // - Azul información (#3B82F6): Datos neutrales
+        // - Rojo serio (#B3261E): Errores críticos sin alarmismo
         MaterialTheme(
             colorScheme = darkColorScheme(
-                primary = Color(0xFF3B82F6),
-                background = Color(0xFF0F1C2E),
-                surface = Color(0xFF1A2332),
-                onSurface = Color.White
+                primary = Color(0xFF5D8BF4),           // Azul ético (confianza sin infantilismo)
+                primaryContainer = Color(0xFF2A3B57),  // Contenedores profundos
+                secondary = Color(0xFF8AA8D1),          // Secundario sereno (no violeta "premium")
+                secondaryContainer = Color(0xFF1A273A),
+                tertiary = Color(0xFF64B5F6),           // Terciario para acciones educativas
+                background = Color(0xFF0B111F),         // "Deep space" - más oscuro, reduce fatiga visual
+                surface = Color(0xFF141E30),            // Azul-noche profundo (no gris plano)
+                surfaceVariant = Color(0xFF1C2A42),
+                error = Color(0xFFB3261E),              // Rojo serio (no alarmista)
+                onPrimary = Color.White,
+                onSecondary = Color.White,
+                onBackground = Color(0xFFE2E8F0),
+                onSurface = Color(0xFFCBD5E1),
+                onSurfaceVariant = Color(0xFF94A3B8)
             )
         ) {
-            Surface(Modifier.fillMaxSize()) {
-                Column(Modifier.padding(16.dp)) {
-                    // 👇 Header con botón de info
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        title = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "GuardianOS ${if (isPro.value) "PRO" else "FREE"}",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                // Indicador de privacidad 100% local
+                                Surface(
+                                    color = Color(0xFF4CAF50),  // Verde esmeralda (procesamiento local verificado)
+                                    shape = MaterialTheme.shapes.small
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(4.dp)
+                                                .background(Color.White, androidx.compose.foundation.shape.CircleShape)
+                                        )
+                                        Spacer(Modifier.width(3.dp))
+                                        Text(
+                                            text = "100% LOCAL",
+                                            fontSize = 7.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+                                if (isMonitoring || currentScreen == "network") {
+                                    Spacer(Modifier.width(8.dp))
+                                    Surface(
+                                        color = Color(0xFF10B981),
+                                        shape = MaterialTheme.shapes.small
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "🛡️",
+                                                fontSize = 10.sp
+                                            )
+                                            Spacer(Modifier.width(2.dp))
+                                            Text(
+                                                text = "ACTIVO",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.White
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            titleContentColor = MaterialTheme.colorScheme.primary
+                        ),
+                        navigationIcon = {
+                            if (currentScreen != "home") {
+                                IconButton(onClick = { currentScreen = "home" }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Home,
+                                        contentDescription = "Inicio",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        },
+                        actions = {
+                            // Icono Info: Información general de la app (versión, licencia, contacto)
+                            IconButton(onClick = { currentScreen = "about" }) {
+                                Icon(
+                                    imageVector = androidx.compose.material.icons.Icons.Default.Info,
+                                    contentDescription = "Acerca de GuardianOS",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            // Icono Shield: Guardian Shield (monitorización en tiempo real)
+                            if (isPro.value && BuildConfig.PRO_VERSION) {
+                                IconButton(onClick = { currentScreen = "transparency" }) {
+                                    Text("🛡️", fontSize = 20.sp)
+                                }
+                            }
+                        }
+                    )
+                }
+            ) { paddingValues ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(paddingValues)
+                        .background(MaterialTheme.colorScheme.background)
+                ) {
+                    when (currentScreen) {
+                        "home" -> HomeScreen(
+                            isPro = isPro.value,
+                            onStartScan = {
+                                currentScreen = "scan"
+                                scope.launch {
+                                    isScanning = true
+                                    try {
+                                        // FREE: Escaneo básico (malware conocido + permisos básicos)
+                                        // PRO: Escaneo completo (malware + stalkerware + permisos avanzados + heurística)
+                                        val useQuickScan = !isPro.value
+                                        scanResults = performMalwareScan(context, isQuickScan = useQuickScan)
+                                        
+                                        // PRO: Guardar en historial automáticamente
+                                        if (isPro.value && BuildConfig.PRO_VERSION) {
+                                            // Convertir AppScanResult a AppAudit para historial
+                                            val apps = appAuditor.auditApps(context, AuditMode.FULL)
+                                            ScanHistory.saveScan(context, apps)
+                                                .onFailure { e ->
+                                                    Log.w(TAG, "No se pudo guardar en historial: ${e.message}")
+                                                }
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Error during scan", e)
+                                        Toast.makeText(
+                                            context,
+                                            "Error durante el escaneo: ${e.localizedMessage}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    } finally {
+                                        isScanning = false
+                                    }
+                                }
+                            },
+                            onActivatePro = { currentScreen = "pro_payment" },
+                            onGuardianShield = {
+                                if (isPro.value) {
+                                    currentScreen = "transparency"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onISOAudit = {
+                                if (isPro.value) {
+                                    currentScreen = "iso"
+                                    scope.launch {
+                                        isAnalyzingISO = true
+                                        try {
+                                            // Timeout de 30 segundos para evitar bloqueos
+                                            isoResults = kotlinx.coroutines.withTimeout(30_000L) {
+                                                performISOAudit(context)
+                                            }
+                                        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                                            Log.e(TAG, "ISO audit timeout after 30 seconds", e)
+                                            Toast.makeText(
+                                                context,
+                                                "⚠️ Auditoría ISO excedió el tiempo límite. Intenta de nuevo.",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                            isoResults = emptyList()
+                                        } catch (e: Exception) {
+                                            Log.e(TAG, "Error during ISO audit", e)
+                                            Toast.makeText(
+                                                context,
+                                                "Error en auditoría ISO: ${e.localizedMessage}",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        } finally {
+                                            isAnalyzingISO = false
+                                        }
+                                    }
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onNetworkMonitor = {
+                                if (isPro.value) {
+                                    currentScreen = "network"
+                                    scope.launch {
+                                        isMonitoring = true
+                                        try {
+                                            val guardian = NetworkGuardian(context)
+                                            val allConnections = guardian.scanActiveConnections()
+                                            networkStats = NetworkStats(
+                                                totalConnections = allConnections.size,
+                                                suspiciousConnections = allConnections.count { it.isSuspicious }
+                                            )
+                                            connections = allConnections.map { conn ->
+                                                com.guardianos.core.domain.model.NetworkConnection(
+                                                    appName = conn.appName,
+                                                    packageName = conn.packageName,
+                                                    remoteAddress = conn.remoteAddress,
+                                                    remotePort = conn.remotePort,
+                                                    isSuspicious = conn.isSuspicious,
+                                                    suspiciousReason = conn.suspiciousReason
+                                                )
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e(TAG, "Error monitoring network", e)
+                                        } finally {
+                                            isMonitoring = false
+                                        }
+                                    }
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onMediaAccess = {
+                                if (isPro.value) {
+                                    currentScreen = "media"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onStalkerwareScan = {
+                                if (isPro.value) {
+                                    currentScreen = "stalkerware"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Detección de stalkerware requiere GuardianOS PRO.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onForensicReport = {
+                                if (isPro.value) {
+                                    currentScreen = "forensic"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onPrivacyProactive = {
+                                if (isPro.value) {
+                                    currentScreen = "privacy"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onConsulting = {
+                                if (isPro.value) {
+                                    currentScreen = "consulting"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onVault = {
+                                if (isPro.value) {
+                                    currentScreen = "vault"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onHistory = {
+                                if (isPro.value) {
+                                    currentScreen = "history"
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Función PRO. Activa la versión PRO para acceder.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        )
+                        
+                        "scan" -> ScanResultsScreen(
+                            results = scanResults,
+                            isScanning = isScanning,
+                            isPro = isPro.value,
+                            onBack = { currentScreen = "home" },
+                            onUpgradePro = { currentScreen = "activation" },
+                            onExportPDF = {
+                                scope.launch {
+                                    try {
+                                        // FREE: PDF básico sin marca forense
+                                        // PRO: PDF profesional con opción de modo forense
+                                        val useForensicMode = isPro.value && BuildConfig.PRO_VERSION
+                                        exportScanToPDF(context, scanResults, forensicMode = useForensicMode)
+                                        
+                                        val message = if (isPro.value) {
+                                            "✅ PDF profesional generado (con marca forense)"
+                                        } else {
+                                            "✅ PDF básico generado (actualiza a PRO para informes forenses)"
+                                        }
+                                        
+                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Error exporting PDF", e)
+                                        Toast.makeText(
+                                            context,
+                                            "Error al exportar PDF: ${e.localizedMessage}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
+                            }
+                        )
+                        
+                        "pro_payment" -> PROPaymentScreen(
+                            context = context,
+                            onActivationSuccess = {
+                                isPro.value = true
+                                currentScreen = "home"
+                                Toast.makeText(
+                                    context,
+                                    "✅ ¡GuardianOS PRO activado! Bienvenido a la protección ética.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            },
+                            onBack = { currentScreen = "home" }
+                        )
+                        
+                        "activation" -> ActivationScreen(
+                            onActivated = {
+                                isPro.value = true
+                                currentScreen = "home"
+                            },
+                            onBack = { currentScreen = "home" }
+                        )
+                        
+                        "iso" -> ISOAuditScreen(
+                            results = isoResults,
+                            isAnalyzing = isAnalyzingISO,
+                            onBack = { currentScreen = "home" },
+                            onExportPDF = {
+                                scope.launch {
+                                    try {
+                                        exportISOAuditPDF(context, isoResults)
+                                        Toast.makeText(
+                                            context,
+                                            "📄 Informe ISO 27001 exportado correctamente",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    } catch (e: Exception) {
+                                        Toast.makeText(
+                                            context,
+                                            "Error al exportar PDF: ${e.localizedMessage}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                        Log.e(TAG, "Error exporting ISO PDF", e)
+                                    }
+                                }
+                            }
+                        )
+                        
+                        "network" -> NetworkAnalyzerScreen(onBack = { currentScreen = "home" })
+                        "media" -> MediaAccessScreen(context = context, onBack = { currentScreen = "home" })
+                        "stalkerware" -> StalkerwareScreen(context = context, onBack = { currentScreen = "home" })
+                        "forensic" -> ForensicReportScreen(results = scanResults, onBack = { currentScreen = "home" })
+                        "privacy" -> PrivacyProactiveScreen(context = context, onBack = { currentScreen = "home" })
+                        "consulting" -> ConsultingScreen(context = context, pdfPath = pdfPath, onBack = { currentScreen = "home" })
+                        
+                        // Información de la app (versión, licencia, contacto)
+                        "about" -> AboutScreen(onBack = { currentScreen = "home" })
+                        
+                        // Guardian Shield (monitorización en tiempo real)
+                        "transparency" -> PermissionTransparencyDashboard(
+                            context = context,
+                            monitor = permissionMonitor,
+                            onBack = { currentScreen = "home" },
+                            onViewHistory = { currentScreen = "guardian_shield_history" }
+                        )
+                        
+                        // Guardian Shield - Historial completo
+                        "guardian_shield_history" -> GuardianShieldHistoryScreen(
+                            onBack = { currentScreen = "transparency" }
+                        )
+                        "cta_iso" -> ProFeatureCTA(onUpgrade = { currentScreen = "pro_payment" })
+                        "cta_network" -> ProFeatureCTA(onUpgrade = { currentScreen = "pro_payment" })
+                        "cta_media" -> ProFeatureCTA(onUpgrade = { currentScreen = "pro_payment" })
+                        "cta_forensic" -> ProFeatureCTA(onUpgrade = { currentScreen = "pro_payment" })
+                        "cta_privacy" -> ProFeatureCTA(onUpgrade = { currentScreen = "pro_payment" })
+                        "cta_consulting" -> ProFeatureCTA(onUpgrade = { currentScreen = "pro_payment" })
+                        
+                        // Family Vault - Flujo de seguridad
+                        "vault" -> {
+                            if (isPro.value) {
+                                // Verificar si ya existe master password
+                                val hasPassword = VaultSecurityManager.hasMasterPassword(context)
+                                if (hasPassword) {
+                                    // Mostrar pantalla de desbloqueo
+                                    VaultUnlockScreen(
+                                        context = context,
+                                        onUnlocked = { currentScreen = "vault_main" },
+                                        onCancel = { currentScreen = "home" }
+                                    )
+                                } else {
+                                    // Primera vez: configurar master password
+                                    MasterPasswordSetupScreen(
+                                        context = context,
+                                        onPasswordSet = { currentScreen = "vault_main" },
+                                        onCancel = { currentScreen = "home" }
+                                    )
+                                }
+                            } else {
+                                Toast.makeText(
+                                    context,
+                                    "Función PRO. La Bóveda Familiar requiere GuardianOS PRO.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                currentScreen = "home"
+                            }
+                        }
+                        
+                        "vault_main" -> FamilyVaultMainScreen(
+                            context = context,
+                            onBack = { currentScreen = "home" }
+                        )
+                        
+                        // Scan History - Comparación temporal
+                        "history" -> {
+                            if (isPro.value) {
+                                ScanHistoryScreen(
+                                    context = context,
+                                    onBack = { currentScreen = "home" }
+                                )
+                            } else {
+                                Toast.makeText(
+                                    context,
+                                    "Función PRO. El Historial de Escaneos requiere GuardianOS PRO.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                currentScreen = "home"
+                            }
+                        }
+                        
+                        // Diagnóstico Técnico - Transparency tool
+                        "diagnostics" -> DiagnosticsScreen(
+                            context = context,
+                            onBack = { currentScreen = "home" }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun HomeScreen(
+        isPro: Boolean,
+        onStartScan: () -> Unit,
+        onActivatePro: () -> Unit,
+        onGuardianShield: () -> Unit,
+        onISOAudit: () -> Unit,
+        onNetworkMonitor: () -> Unit,
+        onMediaAccess: () -> Unit,
+        onStalkerwareScan: () -> Unit = {},
+        onForensicReport: () -> Unit,
+        onPrivacyProactive: () -> Unit,
+        onConsulting: () -> Unit,
+        onVault: () -> Unit = {},
+        onHistory: () -> Unit = {}
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            // ✅ Banner educativo de privacidad (diferenciador ético)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF10B981).copy(alpha = 0.15f)
+                ),
+                border = BorderStroke(1.dp, Color(0xFF10B981))
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = "Privacidad",
+                        tint = Color(0xFF10B981),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "🔒 Todo el análisis ocurre 100% LOCALMENTE en tu dispositivo. Nunca enviamos tus datos a servidores.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF0F766E),
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // Estado PRO/FREE con indicador visual claro
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isPro)
+                        Color(0xFF5D8BF4).copy(alpha = 0.15f)
+                    else
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text(
+                            text = if (isPro) "⭐ GuardianOS PRO" else "🆓 GuardianOS FREE",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isPro) Color(0xFF5D8BF4) else Color.Gray
+                        )
+                        Text(
+                            text = if (isPro)
+                                "Protección avanzada activada"
+                            else
+                                "Funcionalidades básicas disponibles",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                    if (!isPro) {
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = onActivatePro,
+                            modifier = Modifier.height(36.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = Color(0xFF5D8BF4)
+                            ),
+                            border = BorderStroke(1.dp, Color(0xFF5D8BF4))
+                        ) {
+                            Text(
+                                text = "PRO 9.99€",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // Funciones esenciales (siempre disponibles)
+            Text(
+                text = "🛡️ Protección Esencial",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(12.dp))
+
+            FeatureCard(
+                icon = "🔍",
+                title = "Escanear Apps",
+                description = "Detecta malware y permisos invasivos",
+                onClick = onStartScan,
+                isPro = false,
+                color = Color(0xFF5D8BF4)
+            )
+
+            Spacer(Modifier.height(24.dp))
+
+            // Funciones PRO (con upgrade educativo)
+            Text(
+                text = "✨ Protección Avanzada ${if (isPro) "" else "(PRO)"}",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(12.dp))
+
+            if (isPro) {
+                FeatureCard(
+                    icon = "�",
+                    title = "Stalkerware Detection",
+                    description = "Sistema avanzado de detección de apps espía (3 detectores)",
+                    onClick = onStalkerwareScan,
+                    isPro = true,
+                    color = Color(0xFFDC2626)
+                )
+                FeatureCard(
+                    icon = "🛡️",
+                    title = "Guardian Shield",
+                    description = "Alertas en tiempo real de accesos a cámara/micrófono",
+                    onClick = onGuardianShield,
+                    isPro = true,
+                    color = Color(0xFF8B5CF6)
+                )
+                FeatureCard(
+                    icon = "📊",
+                    title = "Auditoría ISO 27001",
+                    description = "Evaluación según estándar internacional",
+                    onClick = onISOAudit,
+                    isPro = true,
+                    color = Color(0xFF8B5CF6)
+                )
+                FeatureCard(
+                    icon = "🌐",
+                    title = "Análisis de Red",
+                    description = "Monitoriza conexiones en tiempo real",
+                    onClick = onNetworkMonitor,
+                    isPro = true,
+                    color = Color(0xFF8B5CF6)
+                )
+                FeatureCard(
+                    icon = "📸",
+                    title = "Apps con Acceso a Multimedia",
+                    description = "Detecta permisos otorgados a fotos/vídeos",
+                    onClick = onMediaAccess,
+                    isPro = true,
+                    color = Color(0xFF8B5CF6)
+                )
+                FeatureCard(
+                    icon = "⚖️",
+                    title = "Informe Forense Legal",
+                    description = "Con validez para procedimientos legales",
+                    onClick = onForensicReport,
+                    isPro = true,
+                    color = Color(0xFF8B5CF6)
+                )
+                FeatureCard(
+                    icon = "🛡️",
+                    title = "Privacidad Proactiva",
+                    description = "Modo sigilo y modo pánico",
+                    onClick = onPrivacyProactive,
+                    isPro = true,
+                    color = Color(0xFF8B5CF6)
+                )
+                FeatureCard(
+                    icon = "👥",
+                    title = "Consultoría Personalizada",
+                    description = "Ayuda experta para interpretar resultados",
+                    onClick = onConsulting,
+                    isPro = true,
+                    color = Color(0xFF8B5CF6)
+                )
+                FeatureCard(
+                    icon = "📁",
+                    title = "Bóveda de Documentos",
+                    description = "Almacena DNI, pasaportes y documentos con cifrado AES-256",
+                    onClick = onVault,
+                    isPro = true,
+                    color = Color(0xFF10B981)
+                )
+                FeatureCard(
+                    icon = "📅",
+                    title = "Historial de Escaneos",
+                    description = "Compara escaneos para detectar amenazas nuevas",
+                    onClick = onHistory,
+                    isPro = true,
+                    color = Color(0xFF3B82F6)
+                )
+            } else {
+                // Modo educativo FREE → PRO (sin bloqueo agresivo)
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onActivatePro() },
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF5D8BF4).copy(alpha = 0.08f)
+                    ),
+                    border = BorderStroke(1.dp, Color(0xFF5D8BF4).copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "⭐ ¿Quieres protección avanzada?",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF5D8BF4)
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "Con GuardianOS PRO (9,99€ pago único) obtienes:",
+                            fontSize = 13.sp,
+                            color = Color.Gray
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        listOf(
+                            "• Detección de stalkerware (apps que espían)",
+                            "• Guardian Shield: monitorización tiempo real de cámara/micrófono",
+                            "• Bóveda cifrada AES-256 para documentos familiares",
+                            "• Informes forenses válidos legalmente",
+                            "• Sin trackers, sin nube, sin analytics"
+                        ).forEach { feature ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("✓", color = Color(0xFF10B981), modifier = Modifier.padding(end = 6.dp))
+                                Text(feature, fontSize = 13.sp, color = Color.Gray)
+                            }
+                        }
+                        Spacer(Modifier.height(16.dp))
+                        Button(
+                            onClick = onActivatePro,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF5D8BF4)
+                            )
+                        ) {
+                            Text("Activar PRO • 9,99€ • Pago único", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // Footer con contacto
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF1E293B)
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "https://guardianos.es",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF5D8BF4)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "info@guardianos.es",
+                        fontSize = 13.sp,
+                        color = Color.Gray
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "© 2026 GuardianOS",
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun FeatureCard(
+        icon: String,
+        title: String,
+        description: String,
+        onClick: () -> Unit,
+        isPro: Boolean = false,
+        color: Color = MaterialTheme.colorScheme.primary
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp)
+                .clickable(onClick = onClick),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isPro)
+                    color.copy(alpha = 0.1f)
+                else
+                    MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = icon,
+                    fontSize = 24.sp,
+                    color = color,
+                    modifier = Modifier.padding(end = 12.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = title,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = description,
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(top = 2.dp),
+                        maxLines = 2
+                    )
+                }
+                if (isPro) {
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        color = color,
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            text = "PRO",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                Icon(
+                    imageVector = Icons.Default.ArrowForward,
+                    contentDescription = "Ir",
+                    tint = color
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun GuardianShieldCard(
+        isActive: Boolean,
+        onToggle: (Boolean) -> Unit,
+        onClick: () -> Unit = {}
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp)
+                .clickable(onClick = onClick),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isActive)
+                    Color(0xFF10B981).copy(alpha = 0.2f)
+                else
+                    MaterialTheme.colorScheme.secondary.copy(alpha = 0.2f)
+            ),
+            border = if (isActive) androidx.compose.foundation.BorderStroke(2.dp, Color(0xFF10B981)) else null
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "🛡️",
+                    fontSize = 32.sp,
+                    modifier = Modifier.padding(end = 16.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Guardian Shield en Tiempo Real",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondary,
+                            shape = MaterialTheme.shapes.small
+                        ) {
+                            Text(
+                                text = "PRO",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    Text(
+                        text = if (isActive) 
+                            "🟢 Monitorizando accesos a permisos cada 30s"
+                        else
+                            "Toca para ver detalles y configurar",
+                        fontSize = 12.sp,
+                        color = if (isActive) Color(0xFF10B981) else Color.Gray,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = isActive,
+                    onCheckedChange = { newState ->
+                        // Evitar que el click del switch propague al card
+                        onToggle(newState)
+                    },
+                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                        checkedThumbColor = Color(0xFF10B981),
+                        checkedTrackColor = Color(0xFF10B981).copy(alpha = 0.5f)
+                    )
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun ScanResultsScreen(
+        results: List<AppScanResult>,
+        isScanning: Boolean,
+        isPro: Boolean,
+        onBack: () -> Unit,
+        onUpgradePro: () -> Unit,
+        onExportPDF: () -> Unit
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = if (isPro) "Auditoría Completa PRO" else "Escaneo Básico",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+            
+            // Descripción del tipo de escaneo
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isPro) 
+                        MaterialTheme.colorScheme.secondary.copy(alpha = 0.1f)
+                    else 
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isPro) "🔒" else "🆓",
+                        fontSize = 20.sp,
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    Text(
+                        text = if (isPro) {
+                            "Malware + Stalkerware + Permisos avanzados + Heurística"
+                        } else {
+                            "Malware conocido + Permisos básicos de privacidad"
+                        },
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                }
+            }
+            
+            if (isScanning) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator()
+                        Spacer(Modifier.height(16.dp))
+                        Text("Escaneando aplicaciones...", fontSize = 14.sp, color = Color.Gray)
+                    }
+                }
+            } else if (results.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            "⚠️ No se encontraron resultados",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Intenta ejecutar el escaneo nuevamente",
+                            fontSize = 14.sp,
+                            color = Color.Gray
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Button(onClick = onBack) {
+                            Text("Volver")
+                        }
+                    }
+                }
+            } else {
+                // Info del dispositivo
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "📱 ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "Android ${android.os.Build.VERSION.RELEASE}",
+                                fontSize = 13.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(12.dp))
+                
+                // Summary Card
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceAround
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "${results.size}",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "Apps Analizadas",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            val threats = results.count { it.isMalware || it.isStalkerware }
+                            Text(
+                                text = "$threats",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (threats > 0)
+                                    MaterialTheme.colorScheme.error
+                                else
+                                    Color(0xFF10B981)
+                            )
+                            Text(
+                                text = "Amenazas",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            val appsWithPerms = results.count { it.suspiciousPermissions.isNotEmpty() }
+                            Text(
+                                text = "$appsWithPerms",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFBBF24)
+                            )
+                            Text(
+                                text = "Apps Invasivas",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                }
+                
+                // Banner upgrade FREE → PRO
+                if (!isPro) {
+                    Spacer(Modifier.height(12.dp))
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onUpgradePro() },
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF7C3AED).copy(alpha = 0.2f)
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp)
+                        ) {
+                            Text(
+                                text = "⭐ ¿Quieres el informe completo?",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFA78BFA)
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = "Con PRO (9,99€) obtienes la auditoría completa con todos los permisos detallados, análisis de stalkerware, y servicio de consultoría personalizada para resolver los problemas detectados.",
+                                fontSize = 12.sp,
+                                color = Color(0xFFC4B5FD)
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Pulsa aquí para activar PRO →",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFA78BFA)
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                // Export Button
+                Button(
+                    onClick = onExportPDF,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Email,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (isPro) "📧 Enviar auditoría completa por email" else "📧 Enviar resumen por email")
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                // Results List
+                LazyColumn(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    items(results.size) { index ->
+                        val result = results[index]
+                        AppResultCard(result, isPro)
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                Button(
+                    onClick = onBack,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF6B7280)
+                    )
+                ) {
+                    Text("Volver")
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun AppResultCard(result: AppScanResult, isPro: Boolean = false) {
+        val context = LocalContext.current
+        val backgroundColor = when {
+            result.isMalware || result.isStalkerware -> MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
+            result.suspiciousPermissions.size >= 5 -> Color(0xFFFBBF24).copy(alpha = 0.1f)
+            else -> MaterialTheme.colorScheme.surface
+        }
+        
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp)
+                .clickable {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", result.packageName, null)
+                    }
+                    context.startActivity(intent)
+                },
+            colors = CardDefaults.cardColors(containerColor = backgroundColor)
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = result.appName,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            text = result.packageName,
+                            fontSize = 11.sp,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+                    
+                    if (result.isMalware || result.isStalkerware) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.error,
+                            shape = MaterialTheme.shapes.small
+                        ) {
+                            Text(
+                                text = "⚠️ AMENAZA",
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+                
+                if (result.isMalware) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "🦠 Malware detectado: ${result.malwareType}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                
+                if (result.isStalkerware) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "👁️ Stalkerware: ${result.stalkerwareIndicators.joinToString(", ")}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                
+                if (result.suspiciousPermissions.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "🔐 Permisos de privacidad (${result.suspiciousPermissions.size}):",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFFBBF24)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    
+                    if (isPro) {
+                        // PRO: Mostrar TODOS los permisos detallados
+                        result.suspiciousPermissions.forEach { perm ->
+                            val (icon, name) = getPermissionIconAndName(perm)
+                            Text(
+                                text = "  $icon $name",
+                                fontSize = 11.sp,
+                                color = Color(0xFFD4D4D8)
+                            )
+                        }
+                    } else {
+                        // FREE: Solo primeros 3 permisos + mensaje de upgrade
+                        result.suspiciousPermissions.take(3).forEach { perm ->
+                            val (icon, name) = getPermissionIconAndName(perm)
+                            Text(
+                                text = "  $icon $name",
+                                fontSize = 11.sp,
+                                color = Color(0xFFD4D4D8)
+                            )
+                        }
+                        if (result.suspiciousPermissions.size > 3) {
+                            Text(
+                                text = "  🔒 +${result.suspiciousPermissions.size - 3} permisos más (PRO)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF8B5CF6)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun ActivationScreen(
+        onActivated: () -> Unit,
+        onBack: () -> Unit
+    ) {
+        val context = LocalContext.current
+        var activationCode by remember { mutableStateOf("") }
+        var error by remember { mutableStateOf("") }
+        
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Text(
+                text = "Activación PRO",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "⭐",
+                        fontSize = 48.sp
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Desbloquea funciones premium",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "• Análisis de privacidad avanzado\n" +
+                               "• Bóveda de documentos familiares\n" +
+                               "• Reportes detallados en PDF\n" +
+                               "• Sin anuncios",
+                        fontSize = 14.sp,
+                        color = Color.Gray
+                    )
+                }
+            }
+            
+            Spacer(Modifier.height(24.dp))
+            
+            OutlinedTextField(
+                value = activationCode,
+                onValueChange = {
+                    activationCode = it.uppercase()
+                    error = ""
+                },
+                label = { Text("Código de activación") },
+                placeholder = { Text("GUAR-XXXX-XXXX-XXXX") },
+                modifier = Modifier.fillMaxWidth(),
+                isError = error.isNotEmpty(),
+                supportingText = if (error.isNotEmpty()) {
+                    { Text(error, color = MaterialTheme.colorScheme.error) }
+                } else null
+            )
+            
+            Spacer(Modifier.height(16.dp))
+            
+            Button(
+                onClick = {
+                    if (validateActivationCode(activationCode)) {
+                        // Guardar estado de activación
+                        saveActivationState(context, true, activationCode)
+                        
+                        // Verificar que se guardó correctamente
+                        val verified = isProActivated(context)
+                        Log.d(TAG, "Activación PRO guardada: $verified con código: $activationCode")
+                        
+                        if (verified) {
+                            Toast.makeText(
+                                context,
+                                "✅ ¡Versión PRO activada con éxito!",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            onActivated()
+                        } else {
+                            Log.e(TAG, "Error: Activación no persistió correctamente")
+                            error = "Error al guardar activación. Inténtalo de nuevo."
+                        }
+                    } else {
+                        error = "Código de activación inválido"
+                        Log.w(TAG, "Código de activación rechazado: $activationCode")
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = activationCode.isNotBlank()
+            ) {
+                Text("Activar PRO")
+            }
+            
+            Spacer(Modifier.height(12.dp))
+            
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp)
+                ) {
+                    Text(
+                        text = "ℹ️ Formato del código",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.Gray
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "El código debe tener el formato: GUAR-1234-5678-6912",
+                        fontSize = 11.sp,
+                        color = Color.Gray
+                    )
+                }
+            }
+            
+            Spacer(Modifier.height(24.dp))
+            
+            Button(
+                onClick = onBack,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF6B7280)
+                )
+            ) {
+                Text("Volver")
+            }
+        }
+    }
+
+    @Composable
+    fun ISOAuditScreen(
+        results: List<ISOViolation>,
+        isAnalyzing: Boolean,
+        onBack: () -> Unit,
+        onExportPDF: () -> Unit = {}
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "Auditoría ISO 27001",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            if (isAnalyzing) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            text = "Analizando cumplimiento...",
+                            color = Color.Gray
+                        )
+                    }
+                }
+            } else {
+                // Summary
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        val score = if (results.isEmpty()) 100 else
+                            maxOf(0, 100 - (results.size * 10))
+                        
+                        Text(
+                            text = "$score%",
+                            fontSize = 48.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = when {
+                                score >= 80 -> Color(0xFF10B981)
+                                score >= 50 -> Color(0xFFFBBF24)
+                                else -> MaterialTheme.colorScheme.error
+                            }
+                        )
+                        Text(
+                            text = "Nivel de cumplimiento",
+                            fontSize = 14.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                if (results.isEmpty()) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF10B981).copy(alpha = 0.15f)
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(text = "✅", fontSize = 48.sp)
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                text = "Sin violaciones detectadas",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Tu dispositivo cumple con los estándares de seguridad ISO 27001",
+                                fontSize = 14.sp,
+                                color = Color.Gray,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    Text(
+                        text = "Violaciones detectadas (${results.size})",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                    
+                    Spacer(Modifier.height(12.dp))
+                    
+                    LazyColumn(
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        items(results.size) { index ->
+                            ISOViolationCard(results[index])
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                // Botón exportar PDF (disponible siempre)
+                Button(
+                    onClick = onExportPDF,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    Text("📄 Exportar Informe PDF")
+                }
+                
+                Spacer(Modifier.height(8.dp))
+                
+                Button(
+                    onClick = onBack,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF6B7280)
+                    )
+                ) {
+                    Text("Volver")
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun ISOViolationCard(violation: ISOViolation) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = when (violation.severity) {
+                    "critical" -> MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
+                    "high" -> Color(0xFFFBBF24).copy(alpha = 0.15f)
+                    else -> MaterialTheme.colorScheme.surface
+                }
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = violation.control,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    
+                    Surface(
+                        color = when (violation.severity) {
+                            "critical" -> MaterialTheme.colorScheme.error
+                            "high" -> Color(0xFFFBBF24)
+                            else -> Color.Gray
+                        },
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            text = violation.severity.uppercase(),
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                
+                Spacer(Modifier.height(8.dp))
+                
+                Text(
+                    text = violation.description,
+                    fontSize = 12.sp,
+                    color = Color.Gray
+                )
+                
+                if (violation.recommendation.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "💡 ${violation.recommendation}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun PrivacyAnalysisScreen(
+        report: PrivacyReport?,
+        isAnalyzing: Boolean,
+        onBack: () -> Unit,
+        onExportPDF: () -> Unit = {}
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "Análisis de Privacidad",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            if (isAnalyzing) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            text = "Analizando privacidad...",
+                            color = Color.Gray
+                        )
+                    }
+                }
+            } else if (report != null) {
+                // Privacy Score
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "${report.privacyScore}%",
+                            fontSize = 48.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = when {
+                                report.privacyScore >= 80 -> Color(0xFF10B981)
+                                report.privacyScore >= 50 -> Color(0xFFFBBF24)
+                                else -> MaterialTheme.colorScheme.error
+                            }
+                        )
+                        Text(
+                            text = "Puntuación de privacidad",
+                            fontSize = 14.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                // Statistics
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "${report.riskyApps.size}",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Text(
+                                text = "Apps de riesgo",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                        
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "${report.excessivePermissions.size}",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFBBF24)
+                            )
+                            Text(
+                                text = "Permisos excesivos",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                // Risky Apps List
+                if (report.riskyApps.isNotEmpty()) {
+                    Text(
+                        text = "Apps con riesgo de privacidad",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                    
+                    Spacer(Modifier.height(12.dp))
+                    
+                    LazyColumn(
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        items(report.riskyApps.size) { index ->
+                            RiskyAppCard(report.riskyApps[index])
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                // Botón exportar PDF (PRO)
+                Button(
+                    onClick = onExportPDF,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    Text("📄 Exportar Informe PDF")
+                }
+                
+                Spacer(Modifier.height(8.dp))
+                
+                Button(
+                    onClick = onBack,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF6B7280)
+                    )
+                ) {
+                    Text("Volver")
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun RiskyAppCard(app: RiskyApp) {
+        val context = LocalContext.current
+        
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp)
+                .clickable {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", app.packageName, null)
+                    }
+                    context.startActivity(intent)
+                },
+            colors = CardDefaults.cardColors(
+                containerColor = when (app.riskLevel) {
+                    "high" -> MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
+                    "medium" -> Color(0xFFFBBF24).copy(alpha = 0.15f)
+                    else -> MaterialTheme.colorScheme.surface
+                }
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = app.appName,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            text = app.packageName,
+                            fontSize = 11.sp,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+                    
+                    Surface(
+                        color = when (app.riskLevel) {
+                            "high" -> MaterialTheme.colorScheme.error
+                            "medium" -> Color(0xFFFBBF24)
+                            else -> Color.Gray
+                        },
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            text = app.riskLevel.uppercase(),
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                
+                if (app.concerns.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    app.concerns.forEach { concern ->
+                        Text(
+                            text = "⚠️ $concern",
+                            fontSize = 12.sp,
+                            color = Color(0xFFFBBF24),
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun NetworkMonitorScreen(
+        stats: NetworkStats?,
+        connections: List<NetworkConnection>,
+        isMonitoring: Boolean,
+        onBack: () -> Unit,
+        onExportPDF: () -> Unit = {}
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "Monitor de Red",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            if (isMonitoring) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            text = "Monitoreando red...",
+                            color = Color.Gray
+                        )
+                    }
+                }
+            } else if (stats != null) {
+                // Network Statistics
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "${stats.totalConnections}",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF10B981)
+                            )
+                            Text(
+                                text = "Conexiones",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                        
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "${stats.suspiciousConnections}",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (stats.suspiciousConnections > 0)
+                                    MaterialTheme.colorScheme.error
+                                else
+                                    Color.Gray
+                            )
+                            Text(
+                                text = "Sospechosas",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                // Alert if suspicious connections
+                if (stats.suspiciousConnections > 0) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = "⚠️", fontSize = 24.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Conexiones sospechosas detectadas",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "Revisa las conexiones marcadas abajo",
+                                    fontSize = 12.sp,
+                                    color = Color.White.copy(alpha = 0.8f)
+                                )
+                            }
+                        }
+                    }
+                    
+                    Spacer(Modifier.height(16.dp))
+                }
+                
+                // Info card cuando NO hay sospechosas (feedback positivo)
+                if (stats.suspiciousConnections == 0 && stats.totalConnections > 0) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF10B981).copy(alpha = 0.15f)
+                        ),
+                        border = BorderStroke(1.dp, Color(0xFF10B981))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = "✅", fontSize = 24.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Red segura",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = Color(0xFF10B981)
+                                )
+                                Text(
+                                    text = "No se detectaron conexiones sospechosas en ${stats.totalConnections} conexiones analizadas",
+                                    fontSize = 12.sp,
+                                    color = Color.Gray
+                                )
+                            }
+                        }
+                    }
+                    
+                    Spacer(Modifier.height(16.dp))
+                }
+                
+                // Empty state
+                if (connections.isEmpty()) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(text = "📡", fontSize = 48.sp)
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                text = "Sin conexiones activas",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "El escaneo se completó correctamente.\nNo se detectaron conexiones de red activas en este momento.\n\nEsto puede ser normal si no hay apps ejecutándose con acceso a internet.",
+                                fontSize = 14.sp,
+                                color = Color.Gray,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    // Connections list header con más info
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
-                            Text("GuardianOS", fontSize = 28.sp, fontWeight = FontWeight.Bold)
-                            Text("Protección digital ética para menores", fontSize = 12.sp, color = Color.Gray)
-                        }
-                        IconButton(onClick = { showAboutDialog = true }) {
-                            Icon(
-                                imageVector = Icons.Default.Info,
-                                contentDescription = "Quiénes somos",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(32.dp)
-                            )
-                        }
-                    }
-
-                    Spacer(Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Modo auditoría")
-                        Spacer(Modifier.width(8.dp))
-                        Switch(
-                            checked = auditMode == AuditMode.FULL,
-                            onCheckedChange = {
-                                auditMode = if (it) AuditMode.FULL else AuditMode.QUICK
-                            }
+                        Text(
+                            text = "📡 Conexiones activas",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
                         )
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (auditMode == AuditMode.FULL) "Completa (con APK)" else "Rápida")
+                        Text(
+                            text = "${connections.map { it.packageName }.distinct().size} apps",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
                     }
+                    
                     Spacer(Modifier.height(12.dp))
-                    Button(
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !loading,
-                        onClick = {
-                            scope.launch {
-                                loading = true
-                                deviceInfo = getDeviceInfo()
-                                systemFindings = appAuditor.auditSystem(context)
-                                apps = appAuditor.auditApps(context, auditMode)
-                                loading = false
-                            }
-                        }
+                    
+                    LazyColumn(
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Text(if (loading) "Auditando…" else "Iniciar auditoría")
-                    }
-                    Spacer(Modifier.height(16.dp))
-                    deviceInfo?.let { info ->
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surface
-                            )
-                        ) {
-                            Column(Modifier.padding(12.dp)) {
-                                Text("Dispositivo auditado", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Spacer(Modifier.height(4.dp))
-                                Text("Modelo: ${info.model}", fontSize = 12.sp)
-                                Text("Fabricante: ${info.manufacturer}", fontSize = 12.sp)
-                                Text("Android: ${info.androidVersion} (API ${info.sdkVersion})", fontSize = 12.sp)
-                            }
+                        items(connections.size) { index ->
+                            NetworkConnectionCard(connections[index])
                         }
-                        Spacer(Modifier.height(8.dp))
-                    }
-                    LazyColumn(Modifier.weight(1f)) {
-                        if (selectedApp == null) {
-                            item {
-                                if (apps.isNotEmpty()) {
-                                    val critical = apps.count { it.risk == Risk.CRITICAL }
-                                    val high = apps.count { it.risk == Risk.HIGH }
-                                    val suspicious = apps.count { it.findings.isNotEmpty() }
-                                    val malware = apps.count { it.findings.any { f ->
-                                        f.title.contains("Malware", ignoreCase = true) ||
-                                                f.title.contains("Firma", ignoreCase = true)
-                                    } }
-                                    Card(
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                        colors = CardDefaults.cardColors(
-                                            containerColor = if (malware > 0 || critical > 0) Color(0xFF7F1D1D)
-                                            else if (high > 0) Color(0xFF7C2D12)
-                                            else Color(0xFF14532D)
-                                        )
-                                    ) {
-                                        Column(Modifier.padding(12.dp)) {
-                                            Text("📊 Resumen de Auditoría", fontWeight = FontWeight.Bold)
-                                            if (malware > 0) {
-                                                Text("🚨 $malware apps con FIRMAS DE MALWARE",
-                                                    color = Color(0xFFFF6B6B),
-                                                    fontWeight = FontWeight.Bold)
-                                            }
-                                            if (critical > 0) {
-                                                Text("⚠️ $critical apps CRÍTICAS detectadas", color = Color(0xFFFF6B6B))
-                                            }
-                                            if (high > 0) {
-                                                Text("⚠️ $high apps de ALTO riesgo", color = Color(0xFFFFA726))
-                                            }
-                                            Text("🔍 $suspicious apps con comportamiento sospechoso")
-                                        }
-                                    }
-                                    Spacer(Modifier.height(8.dp))
-                                }
-                            }
-                            item {
-                                Text("Aplicaciones (${apps.size})", fontWeight = FontWeight.Bold)
-                            }
-                            items(apps.size) { i ->
-                                val app = apps[i]
-                                val hasMalwareSignature = app.findings.any {
-                                    it.title.contains("Malware", ignoreCase = true) ||
-                                            it.title.contains("Firma", ignoreCase = true)
-                                }
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                        .clickable { selectedApp = app },
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = when {
-                                            hasMalwareSignature -> Color(0xFF450A0A)
-                                            app.risk == Risk.CRITICAL -> Color(0xFF450A0A)
-                                            app.risk == Risk.HIGH -> Color(0xFF431407)
-                                            app.risk == Risk.MEDIUM -> Color(0xFF422006)
-                                            else -> MaterialTheme.colorScheme.surface
-                                        }
-                                    )
-                                ) {
-                                    Column(Modifier.padding(12.dp)) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Column(Modifier.weight(1f)) {
-                                                if (hasMalwareSignature) {
-                                                    Text("🚨 MALWARE", fontSize = 10.sp,
-                                                        color = Color(0xFFFF6B6B),
-                                                        fontWeight = FontWeight.Bold)
-                                                }
-                                                Text(app.appName, fontWeight = FontWeight.Bold)
-                                            }
-                                            Text(
-                                                app.risk.toString(),
-                                                fontSize = 11.sp,
-                                                color = when (app.risk) {
-                                                    Risk.CRITICAL -> Color(0xFFFF6B6B)
-                                                    Risk.HIGH -> Color(0xFFFFA726)
-                                                    Risk.MEDIUM -> Color(0xFFFFD93D)
-                                                    Risk.LOW -> Color(0xFF6BCF7F)
-                                                }
-                                            )
-                                        }
-                                        Text("Puntuación: ${app.riskScore}/100", fontSize = 12.sp)
-                                        if (app.findings.isNotEmpty()) {
-                                            Text(
-                                                "⚠️ ${app.findings.size} hallazgos",
-                                                fontSize = 11.sp,
-                                                color = Color(0xFFFF6B6B)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            item {
-                                AppDetailScreen(
-                                    context = context,
-                                    app = selectedApp!!,
-                                    deviceInfo = deviceInfo,
-                                    onBack = { selectedApp = null },
-                                    onExportPdf = {
-                                        val pdf = generateAppPdf(context, selectedApp!!, deviceInfo)
-                                        sharePdf(context, pdf)
-                                    }
-                                )
-                            }
-                        }
-                        item {
-                            Spacer(Modifier.height(12.dp))
-                            Button(
-                                modifier = Modifier.fillMaxWidth(),
-                                enabled = deviceInfo != null && apps.isNotEmpty(),
-                                onClick = {
-                                    val pdf = generateGlobalPdf(context, deviceInfo!!, systemFindings, apps)
-                                    sharePdf(context, pdf)
-                                }
-                            ) {
-                                Text("Exportar informe general PDF")
-                            }
-                        }
+                        
+                        // Resumen al final de la lista
                         item {
                             Spacer(Modifier.height(16.dp))
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surface
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp)
+                                ) {
+                                    Text(
+                                        text = "📊 Resumen del escaneo",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = "• Apps únicas: ${connections.map { it.packageName }.distinct().size}",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray
+                                    )
+                                    Text(
+                                        text = "• Conexiones totales: ${connections.size}",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray
+                                    )
+                                    Text(
+                                        text = "• Puertos HTTPS (443): ${connections.count { it.remotePort == 443 }}",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray
+                                    )
+                                    Text(
+                                        text = "• Puertos HTTP (80): ${connections.count { it.remotePort == 80 }}",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(16.dp))
+                
+                // Botón exportar PDF
+                Button(
+                    onClick = onExportPDF,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    Text("📄 Exportar Informe PDF")
+                }
+                
+                Spacer(Modifier.height(8.dp))
+                
+                Button(
+                    onClick = onBack,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF6B7280)
+                    )
+                ) {
+                    Text("Volver")
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun NetworkConnectionCard(connection: NetworkConnection) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (connection.isSuspicious)
+                    MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
+                else
+                    MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = connection.appName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (connection.isSuspicious) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.error,
+                            shape = MaterialTheme.shapes.small
+                        ) {
                             Text(
-                                "https://guardianos.es · info@guardianos.es",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.primary
+                                text = "⚠️ SOSPECHOSA",
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
                     }
                 }
-            }
-
-            // 👇 Diálogo "Quiénes somos"
-            if (showAboutDialog) {
-                AboutDialog(onDismiss = { showAboutDialog = false })
-            }
-        }
-    }
-
-    @Composable
-    fun AppDetailScreen(
-        context: Context,
-        app: AppAudit,
-        deviceInfo: DeviceInfo?,
-        onBack: () -> Unit,
-        onExportPdf: () -> Unit
-    ) {
-        Column {
-            Text(app.appName, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("Paquete: ${app.packageName}", fontSize = 12.sp)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Riesgo: ${app.risk} (${app.riskScore}/100)",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                color = when (app.risk) {
-                    Risk.CRITICAL -> Color(0xFFFF6B6B)
-                    Risk.HIGH -> Color(0xFFFFA726)
-                    Risk.MEDIUM -> Color(0xFFFFD93D)
-                    Risk.LOW -> Color(0xFF6BCF7F)
+                
+                Spacer(Modifier.height(8.dp))
+                
+                Text(
+                    text = "🌍 ${connection.remoteAddress}:${connection.remotePort}",
+                    fontSize = 13.sp,
+                    color = if (connection.isSuspicious)
+                        MaterialTheme.colorScheme.error
+                    else
+                        Color(0xFF10B981)
+                )
+                
+                if (connection.suspiciousReason != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "⚠️ ${connection.suspiciousReason}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
-            )
-            Spacer(Modifier.height(12.dp))
-            if (app.findings.isNotEmpty()) {
-                Text("🚨 Hallazgos de Seguridad", fontWeight = FontWeight.Bold, color = Color(0xFFFF6B6B))
+                
                 Spacer(Modifier.height(4.dp))
-                app.findings.sortedByDescending { it.weight }.forEach { finding ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = when {
-                                finding.weight >= 40 -> Color(0xFF450A0A)
-                                finding.weight >= 25 -> Color(0xFF431407)
-                                else -> Color(0xFF422006)
-                            }
-                        )
-                    ) {
-                        Column(Modifier.padding(8.dp)) {
-                            Text("• ${finding.title}", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                            Text(finding.description, fontSize = 11.sp, color = Color.Gray)
-                            Text("Impacto: ${finding.weight} pts", fontSize = 10.sp,
-                                color = Color(0xFFFFA726))
-                        }
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-            }
-            Text("Permisos peligrosos (${app.permissions.count { it.dangerous }})",
-                fontWeight = FontWeight.Bold)
-            app.permissions.filter { it.dangerous }.take(10).forEach {
-                Text("• ${it.name.substringAfterLast(".")}", fontSize = 12.sp)
-            }
-            if (app.permissions.count { it.dangerous } > 10) {
-                Text("... y ${app.permissions.count { it.dangerous } - 10} más",
-                    fontSize = 11.sp, color = Color.Gray)
-            }
-            Spacer(Modifier.height(8.dp))
-            Text("Origen: ${app.installSource}", fontSize = 12.sp)
-            Text("Versión: ${app.versionName}", fontSize = 12.sp)
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = onExportPdf, modifier = Modifier.fillMaxWidth()) {
-                Text("Exportar PDF detallado")
-            }
-            Button(
-                modifier = Modifier.fillMaxWidth(),
-                onClick = {
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse("https://guardianos.es/contact"))
-                    )
-                }
-            ) {
-                Text("Contactar con GuardianOS")
-            }
-            TextButton(onClick = onBack) {
-                Text("← Volver")
+                
+                Text(
+                    text = connection.packageName,
+                    fontSize = 11.sp,
+                    color = Color.Gray
+                )
             }
         }
     }
 
-    // 👇 FUNCIÓN DEL DIÁLOGO "QUIÉNES SOMOS"
     @Composable
-    fun AboutDialog(onDismiss: () -> Unit) {
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            title = {
-                Column {
+    fun AboutScreen(onBack: () -> Unit) {
+        val context = LocalContext.current
+        
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            // Logo y título
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Logo del launcher en lugar del emoji
+                    Image(
+                        painter = painterResource(id = R.mipmap.ic_launcher),
+                        contentDescription = "GuardianOS Logo",
+                        modifier = Modifier.size(80.dp)
+                    )
+                    Spacer(Modifier.height(12.dp))
                     Text(
-                        "🛡️ GuardianOS",
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
+                        text = "GuardianOS",
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold
                     )
                     Text(
-                        "Protección digital ética para menores",
+                        text = "v$APP_VERSION",
                         fontSize = 14.sp,
                         color = Color.Gray
                     )
-                }
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .verticalScroll(rememberScrollState())
-                        .padding(vertical = 8.dp)
-                ) {
+                    Spacer(Modifier.height(8.dp))
                     Text(
-                        "Acerca del Proyecto",
+                        text = "Protección Digital Ética para dispositivos móviles",
                         fontSize = 16.sp,
+                        color = Color(0xFF5D8BF4),
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "https://guardianos.es • info@guardianos.es",
+                        fontSize = 13.sp,
+                        color = Color(0xFF5D8BF4),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // ✅ SECCIÓN DESTACADA: Compromiso de Privacidad (diferenciador clave)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF10B981).copy(alpha = 0.15f)
+                ),
+                border = BorderStroke(2.dp, Color(0xFF10B981))
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Privacidad",
+                            tint = Color(0xFF10B981),
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = "🔒 Nuestro Compromiso de Privacidad Radical",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF10B981)
+                        )
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        PrivacyPromiseItem("🚫", "CERO trackers, analytics o telemetry")
+                        PrivacyPromiseItem("📱", "100% de los análisis se ejecutan LOCALMENTE en tu dispositivo")
+                        PrivacyPromiseItem("☁️", "NUNCA guardamos tus datos en la nube")
+                        PrivacyPromiseItem("🔐", "Cifrado AES-256-GCM 100% local (sin backdoors)")
+                        PrivacyPromiseItem("👁️", "NUNCA monitorizamos tu uso de la app")
+                        PrivacyPromiseItem("📜", "Código abierto bajo licencia GPL v3.0 para auditoría pública")
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // Modelo de negocio transparente
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(
+                        text = "💶 Modelo de Negocio Transparente",
+                        fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 8.dp)
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    Text(
+                        text = "• FREE: Funcionalidades básicas sin limitaciones artificiales\n" +
+                               "• PRO: 9,99€ pago único (sin suscripciones, sin renovaciones automáticas)\n" +
+                               "• NO usamos Google Play Billing (evitamos trackers de Google)\n" +
+                               "• El pago se realiza directamente en https://guardianos.es/pro\n" +
+                               "• Sin publicidad, sin venta de datos, sin monetización oculta",
+                        fontSize = 14.sp,
+                        color = Color.Gray,
+                        lineHeight = 22.sp
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // Contacto con información real
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(
+                        text = "📬 Contacto Directo",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 16.dp)
                     )
                     
+                    ContactItem(
+                        icon = "📧",
+                        label = "Email",
+                        value = DEVELOPER_EMAIL,
+                        onClick = {
+                            val intent = Intent(Intent.ACTION_SENDTO).apply {
+                                data = Uri.parse("mailto:$DEVELOPER_EMAIL")
+                                putExtra(Intent.EXTRA_SUBJECT, "Consulta GuardianOS PRO")
+                            }
+                            context.startActivity(intent)
+                        }
+                    )
+                    
+                    ContactItem(
+                        icon = "🌐",
+                        label = "Web",
+                        value = WEB_URL,
+                        onClick = {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(WEB_URL))
+                            context.startActivity(intent)
+                        }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // Licencia y código abierto
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        "GuardianOS es un proyecto de código abierto dedicado a la privacidad y seguridad ética en dispositivos móviles Android, con especial enfoque en la protección de menores.",
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp,
+                        text = "📜 Código Abierto y Licencia",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(bottom = 12.dp)
                     )
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
                     Text(
-                        "🌍 Origen",
+                        text = "GuardianOS es software libre bajo licencia GNU GPL v3.0.\n" +
+                               "Puedes auditar, modificar y redistribuir el código libremente.\n" +
+                               "Repositorio: https://github.com/systemavworks/guardianos-android",
                         fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 4.dp)
+                        color = Color.Gray,
+                        lineHeight = 20.sp
                     )
+                    Spacer(Modifier.height(16.dp))
                     Text(
-                        "Desarrollado en Sevilla, Andalucía, España",
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(bottom = 12.dp)
+                        text = "Copyright © 2026 $DEVELOPER_NAME\n" +
+                               "info@guardianos.es",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
                     )
+                }
+            }
 
-                    Text(
-                        "👨‍💻 Responsable del Proyecto",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 4.dp)
-                    )
-                    Text(
-                        "Víctor Shift Lara",
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
+            Spacer(Modifier.height(32.dp))
+            
+            // Botón volver con icono
+            Button(
+                onClick = onBack,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF5D8BF4)
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ArrowBack,
+                    contentDescription = "Volver"
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Volver al Inicio")
+            }
 
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            Spacer(Modifier.height(24.dp))
+        }
+    }
 
-                    Text(
-                        "🎯 Misión",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 4.dp)
-                    )
-                    Text(
-                        "Proporcionar herramientas gratuitas y transparentes para que familias y educadores puedan proteger a los menores de amenazas digitales, respetando siempre su privacidad y derechos.",
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
+    @Composable
+    private fun PrivacyPromiseItem(icon: String, text: String) {
+        Row(verticalAlignment = Alignment.Top) {
+            Text(icon, fontSize = 20.sp, color = Color(0xFF10B981), modifier = Modifier.padding(end = 12.dp))
+            Text(text, fontSize = 14.sp, color = Color(0xFF0F766E), fontWeight = FontWeight.Medium)
+        }
+    }
 
-                    Text(
-                        "✨ Características",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 4.dp)
-                    )
-                    Column(modifier = Modifier.padding(start = 8.dp, bottom = 12.dp)) {
-                        Text("• Auditoría local sin envío de datos", fontSize = 12.sp)
-                        Text("• Detección de malware y amenazas", fontSize = 12.sp)
-                        Text("• Análisis de permisos peligrosos", fontSize = 12.sp)
-                        Text("• Código abierto y transparente", fontSize = 12.sp)
-                        Text("• Informes PDF detallados", fontSize = 12.sp)
+    @Composable
+    private fun ContactItem(icon: String, label: String, value: String, onClick: (() -> Unit)?) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 12.dp)
+                .clickable(enabled = onClick != null) { onClick?.invoke() },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(icon, fontSize = 24.sp, color = Color(0xFF5D8BF4), modifier = Modifier.padding(end = 16.dp))
+            Column {
+                Text(label, fontSize = 13.sp, color = Color.Gray)
+                Text(
+                    text = value,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (onClick != null) Color(0xFF5D8BF4) else Color.Gray,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            if (onClick != null) {
+                Icon(
+                    imageVector = Icons.Default.ArrowForward,
+                    contentDescription = "Abrir",
+                    tint = Color(0xFF5D8BF4),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+    
+    @Composable
+    fun GuardianShieldScreen(
+        context: Context,
+        isActive: Boolean,
+        onToggle: (Boolean) -> Unit,
+        onBack: () -> Unit,
+        onViewHistory: () -> Unit
+    ) {
+        val monitor = remember { GuardianShieldMonitor(context) }
+        var hasPermission by remember { mutableStateOf(monitor.hasUsageStatsPermission()) }
+        var recentAccesses by remember { mutableStateOf<List<PermissionAccessInfo>>(emptyList()) }
+        var isLoadingHistory by remember { mutableStateOf(false) }
+        val scope = rememberCoroutineScope()
+        
+        // Cargar historial al entrar
+        LaunchedEffect(Unit) {
+            if (hasPermission) {
+                isLoadingHistory = true
+                try {
+                    recentAccesses = monitor.getRecentPermissionAccess(hoursBack = 24)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error loading permission history", e)
+                } finally {
+                    isLoadingHistory = false
+                }
+            }
+        }
+        
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Text(
+                text = "🛡️ Guardian Shield",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            // Card de estado
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isActive) 
+                        Color(0xFF10B981).copy(alpha = 0.15f)
+                    else 
+                        MaterialTheme.colorScheme.surface
+                ),
+                border = if (isActive) 
+                    androidx.compose.foundation.BorderStroke(2.dp, Color(0xFF10B981)) 
+                else null
+            ) {
+                Column( modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isActive) "🟢 Activo" else "⚫ Inactivo",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isActive) Color(0xFF10B981) else Color.Gray
+                            )
+                            Text(
+                                text = if (isActive) 
+                                    "Monitorizando apps al abrirse" 
+                                else 
+                                    "Toca el switch para activar",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = isActive,
+                            onCheckedChange = onToggle,
+                            colors = androidx.compose.material3.SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFF10B981),
+                                checkedTrackColor = Color(0xFF10B981).copy(alpha = 0.5f)
+                            )
+                        )
                     }
-
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            
+            // Información sobre cómo funciona
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        "🔒 Privacidad",
+                        text = "ℹ️ ¿Cómo funciona?",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Guardian Shield detecta cuando ABRES una app (WhatsApp, Instagram, TikTok, etc.) y te notifica " +
+                                "si tiene permisos sensibles concedidos (cámara, micrófono, ubicación, contactos, SMS).\n\n" +
+                                "Análisis en tiempo real: chequeo cada 5 segundos. Todas las detecciones se guardan en el historial.\n\n" +
+                                "100% local - Sin envío de datos a servidores externos.",
                         fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 4.dp)
+                        color = Color.Gray,
+                        lineHeight = 20.sp
                     )
-                    Text(
-                        "Todo el análisis se realiza localmente en el dispositivo. No se envía ninguna información personal ni datos de apps a servidores externos.",
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                    Text(
-                        "📧 Contacto",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 4.dp)
-                    )
-                    Text("Web: https://guardianos.es", fontSize = 12.sp)
-                    Text("Email: info@guardianos.es", fontSize = 12.sp)
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            
+            // Permisos necesarios
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (hasPermission)
+                        Color(0xFF10B981).copy(alpha = 0.1f)
+                    else
+                        MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = if (hasPermission) "✅" else "⚠️",
+                            fontSize = 24.sp
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Permiso de Estadísticas de Uso",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (hasPermission) 
+                                    "Concedido correctamente"
+                                else 
+                                    "Requerido para monitorizar accesos",
+                                fontSize = 12.sp,
+                                color = if (hasPermission) Color(0xFF10B981) else MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                    
+                    if (!hasPermission) {
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                try {
+                                    val intent = Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                                    context.startActivity(intent)
+                                    
+                                    // Actualizar estado después de abrir ajustes
+                                    scope.launch {
+                                        kotlinx.coroutines.delay(500)
+                                        hasPermission = monitor.hasUsageStatsPermission()
+                                    }
+                                } catch (e: Exception) {
+                                    Toast.makeText(
+                                        context,
+                                        "Error al abrir ajustes: ${e.localizedMessage}",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary
+                            )
+                        ) {
+                            Text("🔧 Abrir Ajustes de Permisos")
+                        }
+                        
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "1. Busca 'GuardianOS' en la lista\n2. Activa 'Permitir acceso al uso'",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            
+            // Historial de accesos
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "📋 Accesos Recientes (24h)",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (hasPermission) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        isLoadingHistory = true
+                                        try {
+                                            hasPermission = monitor.hasUsageStatsPermission()
+                                            if (hasPermission) {
+                                                recentAccesses = monitor.getRecentPermissionAccess(hoursBack = 24)
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e(TAG, "Error refreshing", e)
+                                        } finally {
+                                            isLoadingHistory = false
+                                        }
+                                    }
+                                }
+                            ) {
+                                Text("🔄 Actualizar")
+                            }
+                        }
+                    }
                     
                     Spacer(Modifier.height(12.dp))
                     
+                    when {
+                        !hasPermission -> {
+                            Text(
+                                text = "❌ Concede el permiso para ver el historial",
+                                fontSize = 14.sp,
+                                color = Color.Gray,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp)
+                            )
+                        }
+                        isLoadingHistory -> {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator()
+                            }
+                        }
+                        recentAccesses.isEmpty() -> {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("✨", fontSize = 48.sp)
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    text = "Sin accesos detectados",
+                                    fontSize = 14.sp,
+                                    color = Color.Gray
+                                )
+                                Text(
+                                    text = "Las apps que accedan a permisos sensibles aparecerán aquí",
+                                    fontSize = 12.sp,
+                                    color = Color.Gray,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                        else -> {
+                            recentAccesses.take(10).forEach { access ->
+                                PermissionAccessCard(access)
+                                Spacer(Modifier.height(8.dp))
+                            }
+                            
+                            if (recentAccesses.size > 10) {
+                                Text(
+                                    text = "+ ${recentAccesses.size - 10} accesos más",
+                                    fontSize = 12.sp,
+                                    color = Color.Gray,
+                                    modifier = Modifier.padding(top = 8.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            
+            // Botón para ver historial completo guardado
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF5D8BF4).copy(alpha = 0.15f)
+                ),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF5D8BF4))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onViewHistory() }
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "📚 Historial Completo",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF5D8BF4)
+                        )
+                        Text(
+                            text = "Ver todas las detecciones guardadas por GuardianShield",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                    Text("➡️", fontSize = 24.sp)
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = onBack,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF6B7280)
+                )
+            ) {
+                Text("Volver")
+            }
+        }
+    }
+    
+    @Composable
+    fun PermissionAccessCard(access: PermissionAccessInfo) {
+        val icon = when {
+            access.permissionGroup.contains("CAMERA") -> "📷"
+            access.permissionGroup.contains("MICROPHONE") -> "🎤"
+            access.permissionGroup.contains("LOCATION") -> "📍"
+            access.permissionGroup.contains("CONTACTS") -> "👥"
+            access.permissionGroup.contains("SMS") -> "💬"
+            access.permissionGroup.contains("CALL") -> "📞"
+            else -> "🔒"
+        }
+        
+        val permissionName = when {
+            access.permissionGroup.contains("CAMERA") -> "Cámara"
+            access.permissionGroup.contains("MICROPHONE") -> "Micrófono"
+            access.permissionGroup.contains("LOCATION") -> "Ubicación"
+            access.permissionGroup.contains("CONTACTS") -> "Contactos"
+            access.permissionGroup.contains("SMS") -> "SMS"
+            access.permissionGroup.contains("CALL") -> "Llamadas"
+            else -> "Permiso sensible"
+        }
+        
+        val timeAgo = getTimeAgo(access.lastAccessTime)
+        val statusText = if (access.isRealAccess) "Permiso concedido" else "Permiso declarado"
+        val statusColor = if (access.isRealAccess) Color(0xFFEF4444) else Color.Gray
+        
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = if (access.isRealAccess)
+                    MaterialTheme.colorScheme.error.copy(alpha = 0.08f)
+                else
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(icon, fontSize = 24.sp)
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Versión 1.0.0 - 2025",
+                        text = access.appName,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "$permissionName • $timeAgo",
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                    Text(
+                        text = "✓ $statusText",
                         fontSize = 11.sp,
-                        color = Color.Gray,
-                        modifier = Modifier.padding(top = 8.dp)
+                        color = statusColor
                     )
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = onDismiss) {
-                    Text("Cerrar")
-                }
-            },
-            containerColor = MaterialTheme.colorScheme.surface
-        )
+            }
+        }
     }
-
-    /* ────────────────── AUDITORÍA AVANZADA CON 4 CAPAS ────────────────── */
-    private fun getDeviceInfo(): DeviceInfo {
-        return DeviceInfo(
-            manufacturer = Build.MANUFACTURER.replaceFirstChar { it.uppercase() },
-            model = Build.MODEL,
-            androidVersion = when (Build.VERSION.SDK_INT) {
-                Build.VERSION_CODES.TIRAMISU -> "Android 13"
-                Build.VERSION_CODES.S_V2 -> "Android 12L"
-                Build.VERSION_CODES.S -> "Android 12"
-                Build.VERSION_CODES.R -> "Android 11"
-                Build.VERSION_CODES.Q -> "Android 10"
-                Build.VERSION_CODES.P -> "Android 9"
-                Build.VERSION_CODES.O_MR1 -> "Android 8.1"
-                Build.VERSION_CODES.O -> "Android 8.0"
-                else -> if (Build.VERSION.SDK_INT >= 34) "Android 14+" else "Android ${Build.VERSION.SDK_INT}"
-            },
-            sdkVersion = Build.VERSION.SDK_INT,
-            securityPatch = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                Build.VERSION.SECURITY_PATCH
+    
+    private fun getTimeAgo(timestamp: Long): String {
+        val diff = System.currentTimeMillis() - timestamp
+        return when {
+            diff < 60000 -> "Hace menos de 1 min"
+            diff < 3600000 -> "Hace ${diff / 60000} min"
+            diff < 86400000 -> "Hace ${diff / 3600000} h"
+            else -> "Hace ${diff / 86400000} días"
+        }
+    }
+    
+    @Composable
+    fun GuardianShieldHistoryScreen(
+        onBack: () -> Unit
+    ) {
+        val history = remember { GuardianShieldService.getPermissionAccessHistory(this@MainActivity) }
+        var searchQuery by remember { mutableStateOf("") }
+        
+        val filteredHistory: List<String> = remember(searchQuery, history) {
+            if (searchQuery.isBlank()) {
+                history
             } else {
-                "N/A"
-            }
-        )
-    }
-
-    private suspend fun auditApps(
-        context: Context,
-        mode: AuditMode
-    ): List<AppAudit> = withContext(Dispatchers.Default) {
-        val pm = context.packageManager
-        pm.getInstalledApplications(PackageManager.GET_META_DATA).mapNotNull { app ->
-            try {
-                val pkg = pm.getPackageInfo(app.packageName,
-                    PackageManager.GET_PERMISSIONS or PackageManager.GET_SIGNATURES)
-                val permissions = pkg.requestedPermissions?.map {
-                    AppPermission(it, isDangerousPermission(it))
-                } ?: emptyList()
-                val source = detectInstallSource(context, app.packageName)
-                val findings = mutableListOf<AuditFinding>()
-                var score = 0
-                // ╔═══════════════════════════════════════════════════
-                // 🔴 CAPA 1: HUELLAS ESTÁTICAS (Signatures Light)
-                // ╚═══════════════════════════════════════════════════
-                val signatureCheck = checkMalwareSignatures(pkg, app.packageName)
-                findings.addAll(signatureCheck.findings)
-                score += signatureCheck.score
-                // ╔═══════════════════════════════════════════════════
-                // 🟡 CAPA 2: COMPORTAMIENTO HEURÍSTICO
-                // ╚═══════════════════════════════════════════════════
-                val dangerousPerms = permissions.filter { it.dangerous }
-                score += dangerousPerms.size * 12
-                findings.addAll(detectSuspiciousPermissionCombinations(permissions))
-                findings.addAll(analyzePackageName(app.packageName, pm.getApplicationLabel(app).toString()))
-                findings.addAll(detectImpersonation(app.packageName, pm.getApplicationLabel(app).toString()))
-                findings.addAll(detectAdminCapabilities(context, app.packageName))
-                findings.addAll(detectObfuscationPatterns(app.packageName))
-                if (permissions.size > 25) {
-                    findings.add(AuditFinding(
-                        "Permisos excesivos",
-                        "Solicita ${permissions.size} permisos (umbral alto)",
-                        15
-                    ))
-                }
-                // ╔═══════════════════════════════════════════════════
-                // 🟠 CAPA 3: INTEGRIDAD DEL APK (solo modo FULL)
-                // ╚═══════════════════════════════════════════════════
-                if (mode == AuditMode.FULL) {
-                    val integrityCheck = analyzeApkIntegrity(context, pkg, app.packageName)
-                    findings.addAll(integrityCheck.findings)
-                    score += integrityCheck.score
-                }
-                // ╔═══════════════════════════════════════════════════
-                // 🔵 CAPA 4: INDICADORES DE COMPROMISO (IoC ligero)
-                // ╚═══════════════════════════════════════════════════
-                if (mode == AuditMode.FULL) {
-                    val iocCheck = checkNetworkIndicators(context, app.packageName)
-                    findings.addAll(iocCheck.findings)
-                    score += iocCheck.score
-                }
-                // Penalizaciones adicionales
-                if (source == InstallSource.UNKNOWN && dangerousPerms.size > 3) {
-                    findings.add(AuditFinding(
-                        "Origen no verificado + permisos",
-                        "Origen desconocido con múltiples permisos sensibles",
-                        25
-                    ))
-                    score += 25
-                }
-                score += findings.sumOf { it.weight }
-                score = minOf(score, 100)
-                val risk = when {
-                    score >= 80 -> Risk.CRITICAL
-                    score >= 60 -> Risk.HIGH
-                    score >= 30 -> Risk.MEDIUM
-                    else -> Risk.LOW
-                }
-                AppAudit(
-                    appName = pm.getApplicationLabel(app).toString(),
-                    packageName = app.packageName,
-                    versionName = pkg.versionName ?: "N/A",
-                    isSystemApp = source == InstallSource.SYSTEM,
-                    installSource = source,
-                    permissions = permissions,
-                    findings = findings,
-                    riskScore = score,
-                    risk = risk
-                )
-            } catch (e: Exception) {
-                null
-            }
-        }.sortedByDescending { it.riskScore }
-    }
-
-    /* ╔═══════════════════════════════════════════════════
-    🔴 CAPA 1: HUELLAS ESTÁTICAS
-    ╚═══════════════════════════════════════════════════ */
-    private fun checkMalwareSignatures(pkg: PackageInfo, packageName: String): SecurityCheckResult {
-        val findings = mutableListOf<AuditFinding>()
-        var score = 0
-        try {
-            val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                pkg.signingInfo?.apkContentsSigners
-            } else {
-                @Suppress("DEPRECATION")
-                pkg.signatures
-            }
-            signatures?.forEach { signature ->
-                val certHash = calculateSHA256(signature.toByteArray())
-                // Verificar contra base de datos de firmas maliciosas
-                val malwareMatch = malwareSignatures.checkCertificateHash(certHash)
-                if (malwareMatch != null) {
-                    findings.add(AuditFinding(
-                        "🚨 FIRMA DE MALWARE DETECTADA",
-                        "Certificado coincide con malware conocido: ${malwareMatch.name}",
-                        50
-                    ))
-                    score += 50
-                }
-                // Certificados de debug
-                if (certHash.startsWith("a40da80a") || isDebugCertificate(signature)) {
-                    findings.add(AuditFinding(
-                        "Certificado de desarrollo",
-                        "App firmada con certificado debug en producción",
-                        20
-                    ))
-                    score += 20
-                }
-            }
-            // Verificar hash del paquete
-            val packageMatch = malwareSignatures.checkPackageName(packageName)
-            if (packageMatch != null) {
-                findings.add(AuditFinding(
-                    "🚨 PAQUETE MALICIOSO CONOCIDO",
-                    "Paquete identificado como: ${packageMatch.name}",
-                    50
-                ))
-                score += 50
-            }
-        } catch (e: Exception) {
-            // Ignorar errores
-        }
-        return SecurityCheckResult(findings, score)
-    }
-
-    /* ╔═══════════════════════════════════════════════════
-    🟡 CAPA 2: COMPORTAMIENTO HEURÍSTICO
-    ╚═══════════════════════════════════════════════════ */
-    private fun isDangerousPermission(permission: String): Boolean {
-        val dangerous = listOf(
-            "CAMERA", "LOCATION", "FINE_LOCATION", "COARSE_LOCATION",
-            "RECORD_AUDIO", "READ_CONTACTS", "WRITE_CONTACTS",
-            "READ_SMS", "SEND_SMS", "RECEIVE_SMS", "READ_PHONE_STATE",
-            "CALL_PHONE", "READ_CALL_LOG", "WRITE_CALL_LOG",
-            "READ_CALENDAR", "WRITE_CALENDAR", "BODY_SENSORS",
-            "READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE",
-            "ACCESS_MEDIA_LOCATION", "BLUETOOTH", "NEARBY_WIFI",
-            "POST_NOTIFICATIONS", "REQUEST_INSTALL_PACKAGES",
-            "SYSTEM_ALERT_WINDOW", "WRITE_SETTINGS"
-        )
-        return dangerous.any { permission.contains(it) }
-    }
-
-    private fun detectSuspiciousPermissionCombinations(permissions: List<AppPermission>): List<AuditFinding> {
-        val findings = mutableListOf<AuditFinding>()
-        val perms = permissions.map { it.name }
-        // Patrón spyware
-        if (perms.any { it.contains("CAMERA") } &&
-            perms.any { it.contains("RECORD_AUDIO") } &&
-            perms.any { it.contains("LOCATION") }) {
-            findings.add(AuditFinding(
-                "Patrón de vigilancia",
-                "Combinación típica de spyware: cámara + audio + ubicación",
-                35
-            ))
-        }
-        // Acceso total comunicaciones
-        if (perms.any { it.contains("READ_SMS") } &&
-            perms.any { it.contains("READ_CONTACTS") } &&
-            perms.any { it.contains("CALL_PHONE") }) {
-            findings.add(AuditFinding(
-                "Acceso total a comunicaciones",
-                "Control completo sobre SMS, contactos y llamadas",
-                30
-            ))
-        }
-        // Ransomware potencial
-        if (perms.any { it.contains("WRITE_EXTERNAL") } &&
-            perms.any { it.contains("INTERNET") } &&
-            perms.any { it.contains("REQUEST_INSTALL") }) {
-            findings.add(AuditFinding(
-                "Perfil de ransomware",
-                "Puede cifrar archivos, comunicarse externamente e instalar apps",
-                30
-            ))
-        }
-        // Troyano bancario
-        if (perms.any { it.contains("SYSTEM_ALERT_WINDOW") } &&
-            perms.any { it.contains("READ_SMS") } &&
-            perms.any { it.contains("INTERNET") }) {
-            findings.add(AuditFinding(
-                "Patrón de troyano bancario",
-                "Puede crear overlays, leer SMS (2FA) y enviar datos",
-                35
-            ))
-        }
-        return findings
-    }
-
-    private fun analyzePackageName(packageName: String, appName: String): List<AuditFinding> {
-        val findings = mutableListOf<AuditFinding>()
-        val suspicious = listOf(
-            "com.app.test", "com.example", "com.android.test",
-            "free.vpn", "free.antivirus", "hack", "crack", "mod",
-            "pro.unlock", "premium.free", "cheat"
-        )
-        if (suspicious.any { packageName.contains(it, ignoreCase = true) }) {
-            findings.add(AuditFinding(
-                "Nombre de paquete sospechoso",
-                "Sigue patrones comunes en malware/apps pirateadas",
-                18
-            ))
-        }
-        val parts = packageName.split(".")
-        if (parts.any { it.length <= 1 } ||
-            parts.any { it.matches(Regex(".*\\d{4,}.*")) }) {
-            findings.add(AuditFinding(
-                "Estructura anómala de paquete",
-                "Nombre con partes muy cortas o muchos números",
-                12
-            ))
-        }
-        return findings
-    }
-
-    private fun detectImpersonation(packageName: String, appName: String): List<AuditFinding> {
-        val findings = mutableListOf<AuditFinding>()
-        val legitApps = mapOf(
-            "whatsapp" to "com.whatsapp",
-            "instagram" to "com.instagram.android",
-            "facebook" to "com.facebook.katana",
-            "twitter" to "com.twitter.android",
-            "telegram" to "org.telegram.messenger",
-            "tiktok" to "com.zhiliaoapp.musically",
-            "youtube" to "com.google.android.youtube",
-            "netflix" to "com.netflix.mediaclient",
-            "spotify" to "com.spotify.music"
-        )
-        legitApps.forEach { (key, legitPkg) ->
-            if ((appName.contains(key, ignoreCase = true) ||
-                        packageName.contains(key, ignoreCase = true)) &&
-                packageName != legitPkg) {
-                findings.add(AuditFinding(
-                    "⚠️ Posible suplantación",
-                    "Imita a $key (legítimo: $legitPkg)",
-                    40
-                ))
+                history.filter { entry -> entry.contains(searchQuery, ignoreCase = true) }
             }
         }
-        return findings
-    }
-
-    private fun detectObfuscationPatterns(packageName: String): List<AuditFinding> {
-        val findings = mutableListOf<AuditFinding>()
-        // Nombres ofuscados con caracteres similares
-        if (packageName.matches(Regex(".*[Il1oO0]{3,}.*"))) {
-            findings.add(AuditFinding(
-                "Ofuscación de nombre",
-                "Usa caracteres similares para confundir (l, I, 1, o, O, 0)",
-                15
-            ))
-        }
-        return findings
-    }
-
-    private fun detectAdminCapabilities(context: Context, packageName: String): List<AuditFinding> {
-        val findings = mutableListOf<AuditFinding>()
-        try {
-            val pm = context.packageManager
-            val pkg = pm.getPackageInfo(packageName, PackageManager.GET_RECEIVERS)
-            pkg.receivers?.forEach { receiver ->
-                if (receiver.permission == "android.permission.BIND_DEVICE_ADMIN") {
-                    findings.add(AuditFinding(
-                        "Capacidades de administrador",
-                        "Puede obtener privilegios de administrador del dispositivo",
-                        30
-                    ))
-                }
-            }
-        } catch (e: Exception) {
-            // Ignorar
-        }
-        return findings
-    }
-
-    /* ╔═══════════════════════════════════════════════════
-    🟠 CAPA 3: INTEGRIDAD DEL APK
-    ╚═══════════════════════════════════════════════════ */
-    private fun analyzeApkIntegrity(context: Context, pkg: PackageInfo, packageName: String): SecurityCheckResult {
-        val findings = mutableListOf<AuditFinding>()
-        var score = 0
-        try {
-            val apkPath = context.packageManager.getApplicationInfo(packageName, 0).sourceDir
-            val apkFile = File(apkPath)
-            if (!apkFile.exists()) return SecurityCheckResult(findings, score)
-            // 1. Tamaño anormalmente pequeño (< 150 KB)
-            if (apkFile.length() < 150_000) {
-                findings.add(AuditFinding(
-                    "APK sospechosamente pequeño",
-                    "Tamaño: ${apkFile.length()} bytes — posible stub o downloader",
-                    20
-                ))
-                score += 20
-            }
-            // 2. Fecha de modificación posterior a instalación (reempaquetado)
-            val installTime = pkg.firstInstallTime
-            val lastModified = apkFile.lastModified()
-            if (lastModified > installTime + 2 * 3600_000) { // >2h después
-                findings.add(AuditFinding(
-                    "APK modificado tras instalación",
-                    "Archivo modificado ${Date(lastModified)} vs instalación ${Date(installTime)}",
-                    25
-                ))
-                score += 25
-            }
-            // 3. Verificar número de firmas
-            val signatureCount = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                pkg.signingInfo?.apkContentsSigners?.size ?: 1
-            } else {
-                @Suppress("DEPRECATION")
-                pkg.signatures?.size ?: 1
-            }
-            if (signatureCount > 1) {
-                findings.add(AuditFinding(
-                    "Múltiples firmas en APK",
-                    "Detectadas $signatureCount firmas — indica reempaquetado o inyección",
-                    30
-                ))
-                score += 30
-            }
-            // 4. Verificar integridad ZIP mínima
-            try {
-                ZipFile(apkFile).use { zip ->
-                    val entries = zip.entries().toList()
-                    val hasDex = entries.any { it.name == "classes.dex" || it.name.startsWith("classes") }
-                    val hasManifest = entries.any { it.name == "AndroidManifest.xml" }
-                    if (!hasDex) {
-                        findings.add(AuditFinding(
-                            "⚠️ APK sin código ejecutable",
-                            "No contiene classes.dex — posible APK vacío o corrompido",
-                            25
-                        ))
-                        score += 25
-                    }
-                    if (!hasManifest) {
-                        findings.add(AuditFinding(
-                            "⚠️ APK sin manifiesto",
-                            "Falta AndroidManifest.xml — estructura inválida",
-                            30
-                        ))
-                        score += 30
-                    }
-                }
-            } catch (e: Exception) {
-                findings.add(AuditFinding(
-                    "Error al leer APK",
-                    "No se pudo analizar la estructura ZIP — posible corrupción o protección",
-                    20
-                ))
-                score += 20
-            }
-        } catch (e: Exception) {
-            // No penalizar por errores técnicos
-        }
-        return SecurityCheckResult(findings, score)
-    }
-
-    /* ╔═══════════════════════════════════════════════════
-    🔵 CAPA 4: INDICADORES DE COMPROMISO (IoC ligero)
-    ╚═══════════════════════════════════════════════════ */
-    private fun checkNetworkIndicators(context: Context, packageName: String): SecurityCheckResult {
-        val findings = mutableListOf<AuditFinding>()
-        var score = 0
-        // Dominios sospechosos (offline, sin red)
-        val suspiciousKeywords = listOf("tracker", "analytics", "adservice", "stat", "click", "log")
-        if (suspiciousKeywords.any { packageName.contains(it, ignoreCase = true) }) {
-            findings.add(AuditFinding(
-                "Nombre sugiere tracking",
-                "El nombre del paquete contiene términos asociados a rastreo",
-                15
-            ))
-            score += 15
-        }
-        return SecurityCheckResult(findings, score)
-    }
-
-    /* ────────────────────────── FUNCIONES AUXILIARES ────────────────────────── */
-    private fun isRooted(): Boolean {
-        return try {
-            (File("/system/bin/su").exists() ||
-                    File("/system/xbin/su").exists() ||
-                    Build.TAGS.contains("test-keys"))
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun calculateSHA256(data: ByteArray): String {
-        return try {
-            val digest = MessageDigest.getInstance("SHA-256")
-            digest.update(data)
-            digest.digest().joinToString("") { "%02x".format(it) }
-        } catch (e: Exception) {
-            "error"
-        }
-    }
-
-    private fun isDebugCertificate(signature: Signature): Boolean {
-        return try {
-            val certFactory = CertificateFactory.getInstance("X.509")
-            val cert = certFactory.generateCertificate(signature.toByteArray().inputStream()) as X509Certificate
-            val subjectDN = cert.subjectX500Principal.name
-            subjectDN.contains("Android Debug", ignoreCase = true)
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun detectInstallSource(context: Context, packageName: String): InstallSource {
-        val pm = context.packageManager
-        try {
-            val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                pm.getInstallSourceInfo(packageName).installingPackageName
-            } else {
-                @Suppress("DEPRECATION")
-                pm.getInstallerPackageName(packageName)
-            }
-            return when {
-                installer == null -> InstallSource.UNKNOWN
-                installer.contains("com.android.vending") -> InstallSource.PLAY_STORE
-                installer.contains("com.amazon.venezia") -> InstallSource.AMAZON
-                installer.contains("com.sec.android.app.samsungapps") -> InstallSource.SAMSUNG
-                installer.contains("adb") || installer.contains("packageinstaller") -> InstallSource.ADB
-                else -> InstallSource.UNKNOWN
-            }
-        } catch (e: Exception) {
-            return InstallSource.UNKNOWN
-        }
-    }
-
-    private suspend fun auditSystem(context: Context): List<AuditFinding> =
-        withContext(Dispatchers.Default) {
-            val list = mutableListOf<AuditFinding>()
-            // 1. Bloqueo de pantalla
-            val km = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-            if (!km.isDeviceSecure) {
-                list.add(AuditFinding("Bloqueo de pantalla", "No hay bloqueo configurado", 40))
-            }
-            // 2. Root
-            if (isRooted()) {
-                list.add(AuditFinding("Dispositivo rooteado", "El dispositivo tiene acceso root", 60))
-            }
-            // 3. Depuración USB
-            val adbEnabled = Settings.Global.getInt(
-                context.contentResolver,
-                Settings.Global.ADB_ENABLED,
-                0
-            ) == 1
-            if (adbEnabled) {
-                list.add(AuditFinding("Depuración USB", "La depuración USB está activada", 25))
-            }
-            // 4. Instalación de fuentes desconocidas (Android < 8)
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-                @Suppress("DEPRECATION")
-                val unknownSources = Settings.Secure.getInt(
-                    context.contentResolver,
-                    Settings.Secure.INSTALL_NON_MARKET_APPS,
-                    0
-                ) == 1
-                if (unknownSources) {
-                    list.add(AuditFinding(
-                        "Fuentes desconocidas",
-                        "Instalación desde fuentes desconocidas habilitada",
-                        30
-                    ))
-                }
-            }
-            // 5. Verificación de apps
-            try {
-                val verifyApps = Settings.Global.getInt(
-                    context.contentResolver,
-                    "package_verifier_enable",
-                    0
-                )
-                if (verifyApps == 0) {
-                    list.add(AuditFinding(
-                        "Verificación de apps desactivada",
-                        "Google Play Protect o verificación de apps está desactivada",
-                        35
-                    ))
-                }
-            } catch (e: Exception) {
-                // Si no se puede leer, no agregar el hallazgo
-            }
-            list
-        }
-
-    private fun sharePdf(context: Context, file: File) {
-        try {
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                file
+        
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "📚 Historial Completo",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
             )
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/pdf"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                putExtra(Intent.EXTRA_SUBJECT, "Informe GuardianOS")
-                putExtra(Intent.EXTRA_TEXT, "Informe de seguridad generado por GuardianOS – https://guardianos.es")
-            }
-            context.startActivity(Intent.createChooser(intent, "Compartir PDF"))
-        } catch (e: Exception) {
-            Toast.makeText(context, "Error al compartir PDF", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun generateAppPdf(context: Context, app: AppAudit, deviceInfo: DeviceInfo?): File {
-        val pdf = PdfDocument()
-        val pageWidth = 595
-        val pageHeight = 842
-        val margin = 40f
-        val page = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, 1).create())
-        val canvas = page.canvas
-        var y = margin + 20f
-        val titlePaint = Paint().apply {
-            textSize = 24f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            color = android.graphics.Color.rgb(59, 130, 246)
-        }
-        val headerPaint = Paint().apply {
-            textSize = 16f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            color = android.graphics.Color.BLACK
-        }
-        val normalPaint = Paint().apply {
-            textSize = 12f
-            color = android.graphics.Color.BLACK
-        }
-        val smallPaint = Paint().apply {
-            textSize = 10f
-            color = android.graphics.Color.GRAY
-        }
-        canvas.drawText("GuardianOS – Informe de App", margin, y, titlePaint)
-        y += 40f
-        val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault())
-        canvas.drawText("Fecha: ${dateFormat.format(Date())}", margin, y, smallPaint)
-        y += 20f
-        deviceInfo?.let { device ->
-            canvas.drawText("Dispositivo: ${device.manufacturer} ${device.model}", margin, y, smallPaint)
-            y += 15f
-            canvas.drawText("Android: ${device.androidVersion}", margin, y, smallPaint)
-            y += 25f
-        }
-        canvas.drawText("App: ${app.appName}", margin, y, headerPaint)
-        y += 20f
-        canvas.drawText("Paquete: ${app.packageName}", margin, y, normalPaint)
-        y += 15f
-        canvas.drawText("Versión: ${app.versionName} | Origen: ${app.installSource}", margin, y, normalPaint)
-        y += 25f
-        canvas.drawText("RIESGO: ${app.risk} (${app.riskScore}/100)", margin, y, headerPaint)
-        y += 25f
-        if (app.findings.isNotEmpty()) {
-            canvas.drawText("HALLAZGOS (${app.findings.size}):", margin, y, headerPaint)
-            y += 20f
-            app.findings.sortedByDescending { it.weight }.take(10).forEach { f ->
-                val color = when {
-                    f.weight >= 40 -> "🔴 "
-                    f.weight >= 25 -> "🟠 "
-                    else -> "⚠️ "
-                }
-                canvas.drawText("$color${f.title}", margin, y, normalPaint)
-                y += 15f
-                canvas.drawText("   ${f.description} (${f.weight} pts)", margin + 10f, y, normalPaint)
-                y += 20f
-            }
-            if (app.findings.size > 10) {
-                canvas.drawText("... y ${app.findings.size - 10} hallazgos más", margin, y, smallPaint)
-                y += 20f
-            }
-        }
-        y += 20f
-        canvas.drawText("Permisos peligrosos: ${app.permissions.count { it.dangerous }}", margin, y, normalPaint)
-        y += 15f
-        canvas.drawText("– Generado por GuardianOS", margin, y + 30f, smallPaint)
-        canvas.drawText("https://guardianos.es | info@guardianos.es", margin, y + 45f, smallPaint)
-        pdf.finishPage(page)
-        val file = File(context.cacheDir, "guardianos_app_${app.packageName.take(15)}.pdf")
-        FileOutputStream(file).use { pdf.writeTo(it) }
-        pdf.close()
-        return file
-    }
-
-    private fun generateGlobalPdf(
-        context: Context,
-        deviceInfo: DeviceInfo,
-        systemFindings: List<AuditFinding>,
-        apps: List<AppAudit>
-    ): File {
-        val pdf = PdfDocument()
-        val pageWidth = 595
-        val pageHeight = 842
-        val margin = 40f
-        val maxY = pageHeight - margin - 30f
-        var pageNumber = 1
-        var page = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create())
-        var canvas = page.canvas
-        var y = margin + 20f
-        // Configuración de estilos
-        val titlePaint = Paint().apply {
-            textSize = 24f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            color = android.graphics.Color.rgb(59, 130, 246)
-        }
-        val headerPaint = Paint().apply {
-            textSize = 16f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            color = android.graphics.Color.BLACK
-        }
-        val normalPaint = Paint().apply {
-            textSize = 12f
-            color = android.graphics.Color.BLACK
-        }
-        val smallPaint = Paint().apply {
-            textSize = 10f
-            color = android.graphics.Color.GRAY
-        }
-        val criticalPaint = Paint().apply {
-            textSize = 11f
-            color = android.graphics.Color.rgb(220, 38, 38)
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        // Función auxiliar para crear nueva página
-        fun newPage() {
-            pdf.finishPage(page)
-            pageNumber++
-            page = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create())
-            canvas = page.canvas
-            y = margin + 20f
-        }
-        // Función auxiliar para verificar espacio
-        fun checkSpace(needed: Float) {
-            if (y + needed > maxY) {
-                newPage()
-            }
-        }
-        // ========== PÁGINA 1: PORTADA Y RESUMEN ==========
-        canvas.drawText("GuardianOS", margin, y, titlePaint)
-        y += 25f
-        canvas.drawText("Informe Global de Seguridad", margin, y, headerPaint)
-        y += 40f
-        val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault())
-        canvas.drawText("Fecha: ${dateFormat.format(Date())}", margin, y, smallPaint)
-        y += 30f
-        // Información del dispositivo
-        canvas.drawText("DISPOSITIVO AUDITADO", margin, y, headerPaint)
-        y += 20f
-        canvas.drawText("Modelo: ${deviceInfo.manufacturer} ${deviceInfo.model}", margin, y, normalPaint)
-        y += 15f
-        canvas.drawText("Android: ${deviceInfo.androidVersion} (API ${deviceInfo.sdkVersion})", margin, y, normalPaint)
-        y += 15f
-        canvas.drawText("Parche de seguridad: ${deviceInfo.securityPatch}", margin, y, normalPaint)
-        y += 30f
-        // Resumen estadístico
-        val critical = apps.count { it.risk == Risk.CRITICAL }
-        val high = apps.count { it.risk == Risk.HIGH }
-        val medium = apps.count { it.risk == Risk.MEDIUM }
-        val low = apps.count { it.risk == Risk.LOW }
-        val malware = apps.count { it.findings.any { f ->
-            f.title.contains("Malware", ignoreCase = true) ||
-                    f.title.contains("Firma", ignoreCase = true)
-        } }
-        val suspicious = apps.count { it.findings.isNotEmpty() }
-        canvas.drawText("RESUMEN EJECUTIVO", margin, y, headerPaint)
-        y += 20f
-        canvas.drawText("• Total de aplicaciones analizadas: ${apps.size}", margin, y, normalPaint)
-        y += 15f
-        if (malware > 0) {
-            canvas.drawText("🚨 APPS CON FIRMAS DE MALWARE: $malware", margin, y, criticalPaint)
-            y += 15f
-        }
-        canvas.drawText("• Apps de riesgo CRÍTICO: $critical", margin, y, normalPaint)
-        y += 15f
-        canvas.drawText("• Apps de riesgo ALTO: $high", margin, y, normalPaint)
-        y += 15f
-        canvas.drawText("• Apps de riesgo MEDIO: $medium", margin, y, normalPaint)
-        y += 15f
-        canvas.drawText("• Apps de riesgo BAJO: $low", margin, y, normalPaint)
-        y += 15f
-        canvas.drawText("• Apps con comportamiento sospechoso: $suspicious", margin, y, normalPaint)
-        y += 30f
-        // Hallazgos del sistema
-        if (systemFindings.isNotEmpty()) {
-            checkSpace(100f)
-            canvas.drawText("HALLAZGOS DEL SISTEMA (${systemFindings.size})", margin, y, headerPaint)
-            y += 20f
-            systemFindings.take(5).forEach { finding ->
-                checkSpace(30f)
-                canvas.drawText("⚠️ ${finding.title}", margin, y, normalPaint)
-                y += 15f
-                canvas.drawText("   ${finding.description}", margin + 10f, y, smallPaint)
-                y += 20f
-            }
-            if (systemFindings.size > 5) {
-                canvas.drawText("... y ${systemFindings.size - 5} hallazgos más", margin, y, smallPaint)
-                y += 20f
-            }
-        }
-        // ========== PÁGINAS SIGUIENTES: DETALLE DE APPS ==========
-        newPage()
-        canvas.drawText("DETALLE DE APLICACIONES", margin, y, headerPaint)
-        y += 30f
-        // Ordenar apps por riesgo (críticas primero)
-        val sortedApps = apps.sortedWith(
-            compareByDescending<AppAudit> { it.risk.ordinal }
-                .thenByDescending { it.riskScore }
-        )
-        sortedApps.forEach { app ->
-            checkSpace(120f)
-            // Barra de separación
-            canvas.drawLine(margin, y, pageWidth - margin, y, Paint().apply {
-                color = android.graphics.Color.LTGRAY
-                strokeWidth = 1f
-            })
-            y += 15f
-            // Nombre y riesgo
-            val riskColor = when (app.risk) {
-                Risk.CRITICAL -> android.graphics.Color.rgb(220, 38, 38)
-                Risk.HIGH -> android.graphics.Color.rgb(234, 88, 12)
-                Risk.MEDIUM -> android.graphics.Color.rgb(234, 179, 8)
-                Risk.LOW -> android.graphics.Color.rgb(34, 197, 94)
-            }
-            val appTitlePaint = Paint().apply {
-                textSize = 14f
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                color = android.graphics.Color.BLACK
-            }
-            val riskPaint = Paint().apply {
-                textSize = 12f
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                color = riskColor
-            }
-            canvas.drawText(app.appName, margin, y, appTitlePaint)
-            canvas.drawText("[${app.risk}]", pageWidth - margin - 80f, y, riskPaint)
-            y += 18f
-            canvas.drawText("Paquete: ${app.packageName}", margin, y, smallPaint)
-            y += 12f
-            canvas.drawText("Puntuación: ${app.riskScore}/100 | Origen: ${app.installSource}", margin, y, smallPaint)
-            y += 18f
-            // Hallazgos más importantes
-            if (app.findings.isNotEmpty()) {
-                checkSpace(60f)
-                canvas.drawText("Hallazgos (${app.findings.size}):", margin, y, normalPaint)
-                y += 15f
-                app.findings.sortedByDescending { it.weight }.take(3).forEach { finding ->
-                    checkSpace(25f)
-                    val icon = when {
-                        finding.title.contains("Malware", ignoreCase = true) -> "🚨"
-                        finding.weight >= 40 -> "🔴"
-                        finding.weight >= 25 -> "🟠"
-                        else -> "⚠️"
+            
+            // Buscador
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Buscar app o permiso...") },
+                leadingIcon = { Text("🔍") },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQuery = "" }) {
+                            Text("✖️", fontSize = 14.sp)
+                        }
                     }
-                    canvas.drawText("$icon ${finding.title} (${finding.weight} pts)", margin + 10f, y, smallPaint)
-                    y += 12f
+                },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Color(0xFF5D8BF4),
+                    unfocusedBorderColor = Color.Gray
+                )
+            )
+            
+            Spacer(Modifier.height(16.dp))
+            
+            // Contador
+            Text(
+                text = if (filteredHistory.isEmpty()) 
+                    "Sin registros guardados" 
+                else 
+                    "${filteredHistory.size} ${if (filteredHistory.size == 1) "registro" else "registros"}",
+                fontSize = 14.sp,
+                color = Color.Gray,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            
+            // Lista de accesos
+            if (filteredHistory.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(vertical = 48.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text("📭", fontSize = 64.sp)
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        text = if (searchQuery.isBlank()) 
+                            "Historial vacío" 
+                        else 
+                            "No se encontraron resultados",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = if (searchQuery.isBlank())
+                            "Los accesos detectados por GuardianShield aparecerán aquí"
+                        else
+                            "Intenta con otro término de búsqueda",
+                        fontSize = 14.sp,
+                        color = Color.Gray,
+                        textAlign = TextAlign.Center
+                    )
                 }
-                if (app.findings.size > 3) {
-                    canvas.drawText("   ... y ${app.findings.size - 3} hallazgos más", margin + 10f, y, smallPaint)
-                    y += 12f
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(filteredHistory.size) { index ->
+                        val entry = filteredHistory[index]
+                        
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Icono según tipo de permiso
+                                val icon = when {
+                                    entry.contains("cámara", ignoreCase = true) -> "📷"
+                                    entry.contains("micrófono", ignoreCase = true) -> "🎤"
+                                    entry.contains("ubicación", ignoreCase = true) -> "📍"
+                                    entry.contains("contactos", ignoreCase = true) -> "👥"
+                                    entry.contains("SMS", ignoreCase = true) -> "💬"
+                                    entry.contains("llamadas", ignoreCase = true) -> "📞"
+                                    entry.contains("teléfono", ignoreCase = true) -> "📞"
+                                    else -> "🔒"
+                                }
+                                
+                                Text(icon, fontSize = 28.sp)
+                                Spacer(Modifier.width(12.dp))
+                                
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = entry,
+                                        fontSize = 13.sp,
+                                        lineHeight = 18.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            y += 8f
-            // Permisos peligrosos
-            val dangerousCount = app.permissions.count { it.dangerous }
-            if (dangerousCount > 0) {
-                checkSpace(20f)
-                canvas.drawText("Permisos peligrosos: $dangerousCount", margin, y, smallPaint)
-                y += 15f
+            
+            Spacer(Modifier.height(16.dp))
+            
+            // Botones
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (history.isNotEmpty()) {
+                    OutlinedButton(
+                        onClick = {
+                            // Limpiar historial
+                            this@MainActivity.getSharedPreferences("guardian_shield_log", Context.MODE_PRIVATE)
+                                .edit()
+                                .remove("access_log")
+                                .apply()
+                            
+                            Toast.makeText(this@MainActivity, "Historial borrado", Toast.LENGTH_SHORT).show()
+                            onBack()
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = Color(0xFFEF4444)
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444))
+                    ) {
+                        Text("🗑️ Limpiar")
+                    }
+                }
+                
+                Button(
+                    onClick = onBack,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF6B7280)
+                    )
+                ) {
+                    Text("Volver")
+                }
             }
-            y += 10f
         }
-        // ========== PIE DE PÁGINA FINAL ==========
-        checkSpace(80f)
-        y += 20f
-        canvas.drawLine(margin, y, pageWidth - margin, y, Paint().apply {
-            color = android.graphics.Color.LTGRAY
-            strokeWidth = 1f
-        })
-        y += 20f
-        canvas.drawText("RECOMENDACIONES", margin, y, headerPaint)
-        y += 20f
-        if (malware > 0 || critical > 0) {
-            canvas.drawText("⚠️ Se detectaron apps de alto riesgo o con firmas de malware.", margin, y, normalPaint)
-            y += 15f
-            canvas.drawText("   Contacta con GuardianOS para una auditoría profesional.", margin, y, normalPaint)
-            y += 20f
+    }
+
+    /* ────────────────────────── LOGIC FUNCTIONS ────────────────────────── */
+
+    private suspend fun performMalwareScan(context: Context, isQuickScan: Boolean = true): List<AppScanResult> {
+        return withContext(Dispatchers.IO) {
+            try {
+                // Verificar que tenemos permisos necesarios
+                val packageManager = context.packageManager
+                
+                val installedApps = try {
+                    packageManager.getInstalledPackages(PackageManager.GET_PERMISSIONS)
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "Sin permiso QUERY_ALL_PACKAGES, usando lista limitada", e)
+                    packageManager.getInstalledPackages(0) // Fallback sin permisos
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error obteniendo apps instaladas", e)
+                    emptyList()
+                }
+                
+                if (installedApps.isEmpty()) {
+                    Log.w(TAG, "No se pudieron obtener apps instaladas")
+                    return@withContext emptyList()
+                }
+                
+                val results = mutableListOf<AppScanResult>()
+                
+                // MODO QUICK (FREE): Solo detección de malware conocido + permisos básicos de privacidad
+                // MODO FULL (PRO): Malware + Stalkerware + Permisos avanzados + Heurística completa
+                
+                Log.d(TAG, "Escaneo iniciado: ${if (isQuickScan) "QUICK (FREE)" else "FULL (PRO)"} - Apps: ${installedApps.size}")
+                
+                val stalkerwareDetector = StalkerwareDetector(context)
+                val stalkerwareDetections = if (!isQuickScan) {
+                    try {
+                        Log.d(TAG, "Ejecutando análisis de stalkerware (PRO)...")
+                        stalkerwareDetector.scanForStalkerware()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error en análisis de stalkerware", e)
+                        emptyList()
+                    }
+                } else {
+                    emptyList() // En modo QUICK (FREE) no escanea stalkerware
+                }
+                
+                installedApps.forEach { packageInfo ->
+                    try {
+                        val appName = try {
+                            packageInfo.applicationInfo.loadLabel(packageManager).toString()
+                        } catch (e: Exception) {
+                            packageInfo.packageName // Fallback al nombre del paquete
+                        }
+                        val packageName = packageInfo.packageName
+                        
+                        // Scan for malware (siempre, en ambos modos)
+                        val malwareMatch = malwareSignatures.checkPackageName(packageName)
+                        val isMalware = malwareMatch != null
+                        val malwareType = malwareMatch?.name ?: ""
+                        
+                        // Check if it's in stalkerware detections (solo en modo FULL)
+                        val stalkerwareMatch = stalkerwareDetections.find { it.packageName == packageName }
+                        val isStalkerware = stalkerwareMatch != null
+                        val stalkerwareIndicators = stalkerwareMatch?.indicators ?: emptyList()
+                        
+                        // Analizar permisos de forma segura
+                        val permissions = try {
+                            packageInfo.requestedPermissions ?: emptyArray()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error obteniendo permisos de $packageName", e)
+                            emptyArray()
+                        }
+                        
+                        // Permisos básicos de privacidad (FREE + PRO)
+                        val privacyPerms = permissions.filter { perm ->
+                            perm.contains("CAMERA") ||
+                            perm.contains("RECORD_AUDIO") ||
+                            perm.contains("ACCESS_FINE_LOCATION") ||
+                            perm.contains("ACCESS_COARSE_LOCATION") ||
+                            perm.contains("READ_CONTACTS") ||
+                            perm.contains("READ_PHONE_STATE") ||
+                            perm.contains("READ_CALL_LOG") ||
+                            perm.contains("READ_SMS") ||
+                            perm.contains("SEND_SMS") ||
+                            perm.contains("READ_EXTERNAL_STORAGE") ||
+                            perm.contains("WRITE_EXTERNAL_STORAGE") ||
+                            perm.contains("READ_MEDIA_IMAGES") ||
+                            perm.contains("READ_MEDIA_VIDEO") ||
+                            perm.contains("READ_MEDIA_AUDIO") ||
+                            perm.contains("ACCESS_MEDIA_LOCATION") ||
+                            perm.contains("BODY_SENSORS")
+                        }
+                        
+                        // En modo PRO: añadir más permisos avanzados
+                        val extraProPerms = if (!isQuickScan) {
+                            permissions.filter { perm ->
+                                perm.contains("CALL_PHONE") ||
+                                perm.contains("WRITE_CALL_LOG") ||
+                                perm.contains("READ_CALENDAR") ||
+                                perm.contains("WRITE_CALENDAR") ||
+                                perm.contains("BLUETOOTH_CONNECT") ||
+                                perm.contains("NEARBY_WIFI_DEVICES") ||
+                                perm.contains("ACTIVITY_RECOGNITION") ||
+                                perm.contains("ACCESS_BACKGROUND_LOCATION") ||
+                                perm.contains("SYSTEM_ALERT_WINDOW") ||
+                                perm.contains("REQUEST_INSTALL_PACKAGES") ||
+                                perm.contains("BIND_ACCESSIBILITY_SERVICE")
+                            }
+                        } else {
+                            emptyList()
+                        }
+                        
+                        val allSuspicious = (privacyPerms + extraProPerms).distinct()
+                        
+                        // INCLUIR TODAS LAS APPS, no solo las "relevantes"
+                        // Esto evita que el usuario vea una lista vacía en dispositivos limpios
+                        // Las apps peligrosas se ordenarán primero por sorting posterior
+                        results.add(
+                            AppScanResult(
+                                appName = appName,
+                                packageName = packageName,
+                                isMalware = isMalware,
+                                malwareType = malwareType,
+                                isStalkerware = isStalkerware,
+                                stalkerwareIndicators = stalkerwareIndicators,
+                                suspiciousPermissions = allSuspicious
+                            )
+                        )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error scanning app: ${packageInfo.packageName}", e)
+                    }
+                }
+                
+                Log.d(TAG, "Escaneo completado: ${results.size} apps analizadas")
+                
+                // IMPORTANTE: Devolver la lista ordenada (no solo ordenar en memoria)
+                return@withContext results.sortedWith(
+                    compareByDescending<AppScanResult> { it.isMalware || it.isStalkerware }
+                        .thenByDescending { it.suspiciousPermissions.size }
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Error performing malware scan", e)
+                emptyList()
+            }
         }
-        canvas.drawText("Para más información: https://guardianos.es", margin, y, normalPaint)
-        y += 15f
-        canvas.drawText("Contacto: info@guardianos.es", margin, y, normalPaint)
-        y += 30f
-        canvas.drawText("– Informe generado localmente. Sin datos enviados.", margin, y, smallPaint)
-        y += 12f
-        canvas.drawText("© GuardianOS s.l. | Generado el ${dateFormat.format(Date())}", margin, y, smallPaint)
-        pdf.finishPage(page)
-        val file = File(context.cacheDir, "guardianos_report_${System.currentTimeMillis()}.pdf")
-        FileOutputStream(file).use { pdf.writeTo(it) }
-        pdf.close()
-        return file
+    }
+
+    private suspend fun performISOAudit(context: Context): List<ISOViolation> {
+        return withContext(Dispatchers.IO) {
+            try {
+                // Primero obtener auditoría de apps
+                val apps = appAuditor.auditApps(context, AuditMode.FULL)
+                
+                // Usar ISOAuditor con controles completos ISO 27001:2022
+                val report = ISOAuditor.auditISO27001(context, apps)
+                
+                // Convertir a lista de violaciones simples
+                report.controls.flatMap { control ->
+                    if (!control.compliant) {
+                        listOf(ISOViolation(
+                            control = control.id,
+                            description = control.name,
+                            severity = when (control.severity) {
+                                com.guardianos.core.domain.model.ControlSeverity.CRITICAL -> "critical"
+                                com.guardianos.core.domain.model.ControlSeverity.HIGH -> "high"
+                                com.guardianos.core.domain.model.ControlSeverity.MEDIUM -> "medium"
+                                com.guardianos.core.domain.model.ControlSeverity.LOW -> "low"
+                            },
+                            recommendation = control.findings.firstOrNull() ?: "Revisar configuración"
+                        ))
+                    } else {
+                        emptyList()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error performing ISO audit", e)
+                emptyList()
+            }
+        }
+    }
+
+    private suspend fun exportScanToPDF(context: Context, results: List<AppScanResult>, forensicMode: Boolean = false) {
+        withContext(Dispatchers.IO) {
+            try {
+                // Validar que tenemos resultados
+                if (results.isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            context,
+                            "No hay datos para exportar",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    return@withContext
+                }
+                
+                // Verificar espacio disponible
+                val externalDir = context.getExternalFilesDir(null)
+                if (externalDir == null || !externalDir.canWrite()) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            context,
+                            "No se puede escribir en almacenamiento externo",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@withContext
+                }
+                
+                // Usar ItextPDFGenerator para PDFs profesionales
+                val pdfFile = ItextPDFGenerator.generateScanReport(
+                    context,
+                    results,
+                    forensicMode
+                )
+                
+                // Share PDF con soporte explícito para email
+                withContext(Dispatchers.Main) {
+                    val uri = FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        pdfFile
+                    )
+                    
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/pdf"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_SUBJECT, "Reporte de seguridad GuardianOS")
+                        putExtra(Intent.EXTRA_TEXT, 
+                            "Adjunto el informe de seguridad generado por GuardianOS.\n\n" +
+                            "Apps analizadas: ${results.size}\n" +
+                            "Amenazas detectadas: ${results.count { it.isMalware || it.isStalkerware }}\n\n" +
+                            "Más información: https://guardianos.es"
+                        )
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    
+                    context.startActivity(Intent.createChooser(shareIntent, "Enviar reporte por email"))
+                    
+                    Toast.makeText(
+                        context,
+                        "PDF generado: ${pdfFile.name}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error exporting PDF", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "Error al generar PDF: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+    
+    /**
+     * Detecta permisos excesivos en apps (PRO feature).
+     * Un permiso se considera excesivo si la app lo tiene pero es inusual para su categoría.
+     */
+    private fun detectExcessivePermissions(context: Context, apps: List<AppAudit>): List<ExcessivePermission> {
+        val excessive = mutableListOf<ExcessivePermission>()
+        val pm = context.packageManager
+        
+        // Permisos considerados excesivos si no son apps del sistema
+        val dangerousPerms = listOf(
+            "android.permission.CAMERA",
+            "android.permission.RECORD_AUDIO",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_BACKGROUND_LOCATION",
+            "android.permission.READ_CONTACTS",
+            "android.permission.WRITE_CONTACTS",
+            "android.permission.READ_SMS",
+            "android.permission.SEND_SMS",
+            "android.permission.READ_CALL_LOG",
+            "android.permission.WRITE_CALL_LOG",
+            "android.permission.CALL_PHONE",
+            "android.permission.READ_PHONE_STATE"
+        )
+        
+        apps.forEach { app ->
+            try {
+                val packageInfo = pm.getPackageInfo(app.packageName, PackageManager.GET_PERMISSIONS)
+                val requestedPerms = packageInfo.requestedPermissions ?: emptyArray()
+                val grantedPerms = packageInfo.requestedPermissionsFlags ?: IntArray(0)
+                
+                requestedPerms.forEachIndexed { index, perm ->
+                    // Verificar si está granted y es peligroso
+                    val isGranted = (grantedPerms[index] and PackageManager.PERMISSION_GRANTED) != 0
+                    
+                    if (isGranted && dangerousPerms.any { perm.contains(it) }) {
+                        // Analizar si es excesivo basado en el tipo de app
+                        val isExcessive = when {
+                            // Linterna no debería necesitar ubicación, contactos, etc
+                            app.appName.contains("linterna", ignoreCase = true) || 
+                            app.appName.contains("flashlight", ignoreCase = true) -> 
+                                perm.contains("LOCATION") || perm.contains("CONTACTS") || perm.contains("SMS")
+                            
+                            // Apps de fondos de pantalla no deberían necesitar cámara, mic, SMS
+                            app.appName.contains("wallpaper", ignoreCase = true) ||
+                            app.appName.contains("fondo", ignoreCase = true) ->
+                                perm.contains("CAMERA") || perm.contains("RECORD_AUDIO") || perm.contains("SMS")
+                            
+                            // Juegos que piden ubicación background es sospechoso
+                            app.appName.contains("game", ignoreCase = true) ||
+                            app.appName.contains("juego", ignoreCase = true) ->
+                                perm.contains("BACKGROUND_LOCATION") || perm.contains("READ_SMS")
+                            
+                            // Apps que no son de mensajería no deberían leer SMS
+                            !app.appName.contains("message", ignoreCase = true) &&
+                            !app.appName.contains("sms", ignoreCase = true) &&
+                            !app.appName.contains("whatsapp", ignoreCase = true) &&
+                            !app.appName.contains("telegram", ignoreCase = true) ->
+                                perm.contains("READ_SMS") || perm.contains("SEND_SMS")
+                            
+                            else -> false
+                        }
+                        
+                        if (isExcessive) {
+                            excessive.add(
+                                ExcessivePermission(
+                                    packageName = app.packageName,
+                                    permission = getFriendlyPermissionName(perm),
+                                    reason = "Inusual para este tipo de app"
+                                )
+                            )
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // Ignorar apps que no se pueden analizar
+            }
+        }
+        
+        return excessive
+    }
+    
+    /**
+     * Exporta el informe de privacidad en formato PDF (PRO).
+     */
+    private suspend fun exportPrivacyReportPDF(context: Context, report: PrivacyReport?) {
+        if (report == null) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "No hay reporte para exportar", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        
+        withContext(Dispatchers.IO) {
+            try {
+                // Crear PDF con información del reporte de privacidad
+                val timestamp = System.currentTimeMillis()
+                val fileName = "GuardianOS_Privacy_Report_$timestamp.pdf"
+                val pdfFile = File(context.getExternalFilesDir(null), fileName)
+                
+                // Usar iText para generar PDF profesional
+                val document = com.itextpdf.kernel.pdf.PdfDocument(
+                    com.itextpdf.kernel.pdf.PdfWriter(pdfFile)
+                )
+                val pdfDoc = com.itextpdf.layout.Document(document)
+                
+                // Título
+                val titleFont = com.itextpdf.kernel.font.PdfFontFactory.createFont(
+                    com.itextpdf.io.font.constants.StandardFonts.HELVETICA_BOLD
+                )
+                val title = com.itextpdf.layout.element.Paragraph("INFORME DE PRIVACIDAD")
+                    .setFont(titleFont)
+                    .setFontSize(24f)
+                    .setTextAlignment(com.itextpdf.layout.properties.TextAlignment.CENTER)
+                pdfDoc.add(title)
+                
+                // Score
+                val scoreColor = when {
+                    report.privacyScore >= 80 -> com.itextpdf.kernel.colors.ColorConstants.GREEN
+                    report.privacyScore >= 50 -> com.itextpdf.kernel.colors.ColorConstants.ORANGE
+                    else -> com.itextpdf.kernel.colors.ColorConstants.RED
+                }
+                val score = com.itextpdf.layout.element.Paragraph("Puntuación: ${report.privacyScore}/100")
+                    .setFont(titleFont)
+                    .setFontSize(18f)
+                    .setFontColor(scoreColor)
+                    .setTextAlignment(com.itextpdf.layout.properties.TextAlignment.CENTER)
+                pdfDoc.add(score)
+                
+                pdfDoc.add(com.itextpdf.layout.element.Paragraph("\n"))
+                
+                // Resumen
+                pdfDoc.add(com.itextpdf.layout.element.Paragraph("RESUMEN EJECUTIVO")
+                    .setFont(titleFont)
+                    .setFontSize(14f))
+                pdfDoc.add(com.itextpdf.layout.element.Paragraph(
+                    "• Apps con riesgo de privacidad: ${report.riskyApps.size}\n" +
+                    "• Permisos excesivos detectados: ${report.excessivePermissions.size}\n" +
+                    "• Apps de alto riesgo: ${report.riskyApps.count { it.riskLevel == "high" }}\n\n"
+                ))
+                
+                // Apps de riesgo
+                if (report.riskyApps.isNotEmpty()) {
+                    pdfDoc.add(com.itextpdf.layout.element.Paragraph("APPS CON RIESGO DE PRIVACIDAD")
+                        .setFont(titleFont)
+                        .setFontSize(14f))
+                    
+                    report.riskyApps.forEach { app ->
+                        pdfDoc.add(com.itextpdf.layout.element.Paragraph(
+                            "• ${app.appName} (${app.riskLevel.uppercase()})\n" +
+                            "  Package: ${app.packageName}\n" +
+                            "  Preocupaciones: ${app.concerns.joinToString(", ")}\n"
+                        ))
+                    }
+                    pdfDoc.add(com.itextpdf.layout.element.Paragraph("\n"))
+                }
+                
+                // Permisos excesivos
+                if (report.excessivePermissions.isNotEmpty()) {
+                    pdfDoc.add(com.itextpdf.layout.element.Paragraph("PERMISOS EXCESIVOS")
+                        .setFont(titleFont)
+                        .setFontSize(14f))
+                    
+                    report.excessivePermissions.forEach { perm ->
+                        pdfDoc.add(com.itextpdf.layout.element.Paragraph(
+                            "• ${perm.permission}\n" +
+                            "  App: ${perm.packageName}\n" +
+                            "  Razón: ${perm.reason}\n"
+                        ))
+                    }
+                }
+                
+                // Footer
+                pdfDoc.add(com.itextpdf.layout.element.Paragraph("\n\n"))
+                pdfDoc.add(com.itextpdf.layout.element.Paragraph(
+                    "Generado por GuardianOS v1.0\n" +
+                    "Fecha: ${java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault()).format(java.util.Date())}"
+                ).setFontSize(10f).setTextAlignment(com.itextpdf.layout.properties.TextAlignment.CENTER))
+                
+                pdfDoc.close()
+                
+                // Compartir PDF
+                withContext(Dispatchers.Main) {
+                    val uri = FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        pdfFile
+                    )
+                    
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/pdf"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Compartir informe"))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error exporting privacy PDF", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "Error al generar PDF: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+    
+    /**
+     * Exporta el informe de auditoría ISO 27001 en formato PDF (PRO).
+     */
+    private suspend fun exportISOAuditPDF(context: Context, results: List<ISOViolation>) {
+        withContext(Dispatchers.IO) {
+            try {
+                // Obtener información completa del dispositivo
+                val deviceInfo = com.guardianos.core.domain.model.DeviceInfo(
+                    manufacturer = android.os.Build.MANUFACTURER,
+                    model = android.os.Build.MODEL,
+                    androidVersion = android.os.Build.VERSION.RELEASE,
+                    sdkVersion = android.os.Build.VERSION.SDK_INT,
+                    securityPatch = android.os.Build.VERSION.SECURITY_PATCH ?: "N/A"
+                )
+                
+                // Convertir ISOViolation a controles ISO estándar
+                val controls = mutableListOf<com.guardianos.core.domain.model.ISOControl>()
+                
+                // Controles estándar evaluados en la auditoría
+                val standardControls = listOf(
+                    "A.5.7" to "Inteligencia de amenazas",
+                    "A.5.23" to "Seguridad en servicios cloud",
+                    "A.8.9" to "Gestión de configuración",
+                    "A.8.23" to "Filtrado web",
+                    "A.8.24" to "Uso de criptografía",
+                    "A.8.28" to "Codificación segura"
+                )
+                
+                // Determinar cumplimiento de cada control
+                standardControls.forEach { (id, name) ->
+                    val violations = results.filter { 
+                        it.control.contains(id, ignoreCase = true) || 
+                        it.description.contains(name, ignoreCase = true) 
+                    }
+                    
+                    controls.add(
+                        com.guardianos.core.domain.model.ISOControl(
+                            id = id,
+                            name = name,
+                            description = "Control de seguridad según ISO 27001:2022",
+                            compliant = violations.isEmpty(),
+                            severity = when {
+                                violations.any { it.severity == "critical" } -> 
+                                    com.guardianos.core.domain.model.ControlSeverity.CRITICAL
+                                violations.any { it.severity == "high" } -> 
+                                    com.guardianos.core.domain.model.ControlSeverity.HIGH
+                                violations.any { it.severity == "medium" } -> 
+                                    com.guardianos.core.domain.model.ControlSeverity.MEDIUM
+                                else -> com.guardianos.core.domain.model.ControlSeverity.LOW
+                            },
+                            findings = violations.map { "${it.control}: ${it.description}" }
+                        )
+                    )
+                }
+                
+                // Calcular estadísticas
+                val criticalFindings = results.count { it.severity == "critical" }
+                val highFindings = results.count { it.severity == "high" }
+                val mediumFindings = results.count { it.severity == "medium" }
+                val compliance = ((controls.count { it.compliant }.toFloat() / controls.size) * 100)
+                
+                // Crear reporte completo
+                val isoReport = com.guardianos.core.domain.model.ISOAuditReport(
+                    deviceInfo = deviceInfo,
+                    scanTimestamp = System.currentTimeMillis(),
+                    controls = controls,
+                    overallCompliance = compliance,
+                    criticalFindings = criticalFindings,
+                    highFindings = highFindings,
+                    mediumFindings = mediumFindings,
+                    lowFindings = 0
+                )
+                
+                // Generar PDF profesional con ItextPDFGenerator (incluye SIEMPRE info del dispositivo)
+                val pdfFile = com.guardianos.core.pdf.ItextPDFGenerator.generateISOReport(
+                    context = context,
+                    isoReport = isoReport,
+                    forensicMode = false  // Cambiar a true para modo forense/legal con Device ID
+                )
+                
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "✅ PDF ISO 27001 exportado\n\n" +
+                        "📱 ${deviceInfo.manufacturer} ${deviceInfo.model}\n" +
+                        "🤖 Android ${deviceInfo.androidVersion}\n" +
+                        "🔒 Cumplimiento: ${String.format("%.1f", compliance)}%",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    
+                    // Compartir PDF
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdfFile)
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/pdf"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_SUBJECT, "Auditoría ISO 27001 - GuardianOS PRO")
+                        putExtra(Intent.EXTRA_TEXT, 
+                            "Auditoría ISO 27001:2022 generada por GuardianOS PRO\n\n" +
+                            "Dispositivo: ${deviceInfo.manufacturer} ${deviceInfo.model}\n" +
+                            "Android: ${deviceInfo.androidVersion}\n" +
+                            "Cumplimiento: ${String.format("%.1f", compliance)}%")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Compartir auditoría ISO 27001"))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error al exportar PDF ISO 27001", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "❌ Error al generar PDF: ${e.localizedMessage}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+    
+    /**
+     * Exporta el informe del monitor de red en formato PDF (PRO).
+     */
+    private suspend fun exportNetworkMonitorPDF(context: Context, stats: NetworkStats?, connections: List<NetworkConnection>) {
+        if (stats == null) return
+        
+        withContext(Dispatchers.IO) {
+            try {
+                val timestamp = System.currentTimeMillis()
+                val fileName = "GuardianOS_Network_$timestamp.pdf"
+                val pdfFile = File(context.getExternalFilesDir(null), fileName)
+                
+                val document = com.itextpdf.kernel.pdf.PdfDocument(
+                    com.itextpdf.kernel.pdf.PdfWriter(pdfFile)
+                )
+                val pdfDoc = com.itextpdf.layout.Document(document)
+                
+                val titleFont = com.itextpdf.kernel.font.PdfFontFactory.createFont(
+                    com.itextpdf.io.font.constants.StandardFonts.HELVETICA_BOLD
+                )
+                pdfDoc.add(com.itextpdf.layout.element.Paragraph("MONITOR DE RED")
+                    .setFont(titleFont).setFontSize(24f)
+                    .setTextAlignment(com.itextpdf.layout.properties.TextAlignment.CENTER))
+                
+                pdfDoc.add(com.itextpdf.layout.element.Paragraph("\nESTADÍSTICAS:").setFont(titleFont))
+                pdfDoc.add(com.itextpdf.layout.element.Paragraph(
+                    "Conexiones: ${stats.totalConnections}\nSospechosas: ${stats.suspiciousConnections}\n"
+                ))
+                
+                if (connections.any { it.isSuspicious }) {
+                    pdfDoc.add(com.itextpdf.layout.element.Paragraph("\nSOSPECHOSAS:").setFont(titleFont))
+                    connections.filter { it.isSuspicious }.forEach {
+                        pdfDoc.add(com.itextpdf.layout.element.Paragraph(
+                            "• ${it.appName} → ${it.remoteAddress}:${it.remotePort}\n"
+                        ))
+                    }
+                }
+                
+                pdfDoc.close()
+                
+                withContext(Dispatchers.Main) {
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdfFile)
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/pdf"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Compartir informe"))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error exporting network PDF", e)
+            }
+        }
+    }
+    
+    /**
+     * Convierte nombre técnico de permiso a nombre amigable.
+     */
+    private fun getPermissionIconAndName(permission: String): Pair<String, String> {
+        return when {
+            permission.contains("CAMERA") -> "📷" to "Cámara"
+            permission.contains("RECORD_AUDIO") -> "🎤" to "Micrófono"
+            permission.contains("ACCESS_BACKGROUND_LOCATION") -> "📍" to "Ubicación en segundo plano"
+            permission.contains("ACCESS_FINE_LOCATION") -> "📍" to "Ubicación precisa (GPS)"
+            permission.contains("ACCESS_COARSE_LOCATION") -> "📍" to "Ubicación aproximada"
+            permission.contains("ACCESS_MEDIA_LOCATION") -> "📍" to "Ubicación en fotos/vídeos"
+            permission.contains("READ_CONTACTS") -> "👤" to "Contactos"
+            permission.contains("READ_SMS") || permission.contains("SEND_SMS") -> "💬" to "Mensajes SMS"
+            permission.contains("READ_CALL_LOG") || permission.contains("WRITE_CALL_LOG") -> "📞" to "Registro de llamadas"
+            permission.contains("CALL_PHONE") -> "📞" to "Realizar llamadas"
+            permission.contains("READ_PHONE_STATE") -> "📱" to "Estado del teléfono (IMEI)"
+            permission.contains("READ_EXTERNAL_STORAGE") -> "📁" to "Acceso a archivos"
+            permission.contains("WRITE_EXTERNAL_STORAGE") -> "📁" to "Escritura en archivos"
+            permission.contains("READ_MEDIA_IMAGES") -> "🖼️" to "Fotos"
+            permission.contains("READ_MEDIA_VIDEO") -> "🎬" to "Vídeos"
+            permission.contains("READ_MEDIA_AUDIO") -> "🎵" to "Archivos de audio"
+            permission.contains("BODY_SENSORS") -> "💓" to "Sensores corporales"
+            permission.contains("ACTIVITY_RECOGNITION") -> "🏃" to "Actividad física"
+            permission.contains("READ_CALENDAR") || permission.contains("WRITE_CALENDAR") -> "📅" to "Calendario"
+            permission.contains("BLUETOOTH_CONNECT") -> "📶" to "Bluetooth"
+            permission.contains("NEARBY_WIFI_DEVICES") -> "📶" to "Dispositivos Wi-Fi cercanos"
+            permission.contains("SYSTEM_ALERT_WINDOW") -> "⚠️" to "Superposición sobre apps"
+            permission.contains("REQUEST_INSTALL_PACKAGES") -> "⚠️" to "Instalar apps externas"
+            permission.contains("ACCESSIBILITY") -> "⚠️" to "Accesibilidad (control total)"
+            else -> "🔒" to permission.substringAfterLast(".")
+        }
+    }
+
+    private fun getFriendlyPermissionName(permission: String): String {
+        return when {
+            permission.contains("CAMERA") -> "Cámara"
+            permission.contains("RECORD_AUDIO") -> "Micrófono"
+            permission.contains("LOCATION") -> "Ubicación"
+            permission.contains("CONTACTS") -> "Contactos"
+            permission.contains("SMS") -> "SMS"
+            permission.contains("CALL") -> "Registro de Llamadas"
+            permission.contains("PHONE") -> "Estado del Teléfono"
+            else -> permission.substringAfterLast(".")
+        }
     }
 }

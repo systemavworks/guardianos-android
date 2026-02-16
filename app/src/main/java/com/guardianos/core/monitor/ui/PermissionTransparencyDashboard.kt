@@ -1,0 +1,700 @@
+/*
+ * GuardianOS - Ethical digital protection for minors
+ * Copyright (C) 2026 Victor Shift Lara
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ */
+
+package com.guardianos.core.monitor.ui
+
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
+import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.guardianos.core.monitor.ActivePermissionUsage
+import com.guardianos.core.monitor.PermissionType
+import com.guardianos.core.monitor.RealTimePermissionMonitor
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.*
+
+/**
+ * Dashboard de Transparencia Ética - Monitorización en Tiempo Real
+ * 
+ * Filosofía: Informa sin alarmar, muestra límites técnicos transparentemente
+ */
+@Composable
+fun PermissionTransparencyDashboard(
+    context: Context,
+    monitor: RealTimePermissionMonitor,
+    onBack: () -> Unit,
+    onViewHistory: (() -> Unit)? = null
+) {
+    val scope = rememberCoroutineScope()
+    
+    // Historial persistente guardado en SharedPreferences (única fuente de datos confiable)
+    var savedHistory by remember { mutableStateOf<List<String>>(emptyList()) }
+    
+    // Estado real del servicio (sincronizado con SharedPreferences)
+    var isServiceActive by remember { 
+        mutableStateOf(com.guardianos.core.monitor.GuardianShieldService.isRunning(context)) 
+    }
+    
+    // Cargar historial persistente al inicio
+    LaunchedEffect(Unit) {
+        savedHistory = com.guardianos.core.monitor.GuardianShieldService.getPermissionAccessHistory(context)
+    }
+    
+    // Recargar historial cada 5 segundos para mostrar nuevas detecciones
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(5000)
+            savedHistory = com.guardianos.core.monitor.GuardianShieldService.getPermissionAccessHistory(context)
+            isServiceActive = com.guardianos.core.monitor.GuardianShieldService.isRunning(context)
+        }
+    }
+    
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        // Header con filosofía ética
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = Color(0xFF1E293B) // Azul-noche profundo
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = "Transparencia",
+                        tint = Color(0xFF5D8BF4), // Azul ético
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = "👁️ Transparencia Radical",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF5D8BF4) // Azul ético
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "GuardianOS muestra EXACTAMENTE qué permisos están siendo usados en tiempo real. Sin alarmismo, sin juicios: solo datos verificables.",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    lineHeight = 20.sp
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "🔒 Todo el análisis ocurre 100% en tu dispositivo. Nunca enviamos estos datos a ningún servidor.",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF4CAF50) // Verde esmeralda para cifrado local
+                )
+            }
+        }
+        
+        Spacer(Modifier.height(16.dp))
+        
+        // Callback para solicitar permisos
+        val onRequestPermissions = {
+            try {
+                context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            } catch (e: Exception) {
+                Toast.makeText(context, "No se puede abrir ajustes", Toast.LENGTH_SHORT).show()
+            }
+        }
+        
+        // Crear monitor temporal para verificar permisos
+        val hasUsageStats = remember {
+            com.guardianos.core.monitor.GuardianShieldMonitor(context).hasUsageStatsPermission()
+        }
+        
+        // Card informativa de permisos requeridos
+        if (!hasUsageStats) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF2196F3).copy(alpha = 0.15f)
+                ),
+                border = BorderStroke(1.dp, Color(0xFF2196F3))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("ℹ️", fontSize = 24.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = "Permisos necesarios para Guardian Shield",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1976D2)
+                        )
+                    }
+                    
+                    Spacer(Modifier.height(16.dp))
+                    
+                    PermissionInfoItem(
+                        icon = "📊",
+                        title = "1. Acceso a uso de aplicaciones",
+                        description = "Permite detectar qué apps están usando permisos en tiempo real",
+                        isGranted = hasUsageStats
+                    )
+                    
+                    Spacer(Modifier.height(12.dp))
+                    
+                    PermissionInfoItem(
+                        icon = "🔔",
+                        title = "2. Notificaciones (Android 13+)",
+                        description = "Para informarte silenciosamente cuando apps usan cámara, micrófono, etc.",
+                        isGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == 
+                                android.content.pm.PackageManager.PERMISSION_GRANTED
+                        } else true
+                    )
+                    
+                    Spacer(Modifier.height(12.dp))
+                    
+                    PermissionInfoItem(
+                        icon = "🔋",
+                        title = "3. Sin restricciones de batería (recomendado)",
+                        description = "Evita que Android detenga el servicio. Opcional pero mejora la fiabilidad.",
+                        isGranted = null // No verificamos, es opcional
+                    )
+                    
+                    Spacer(Modifier.height(16.dp))
+                    
+                    Text(
+                        text = "🔒 Privacidad garantizada:",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF4CAF50)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "• Todo el análisis ocurre 100% localmente en tu dispositivo\n" +
+                               "• NUNCA enviamos información de tus apps a servidores\n" +
+                               "• Los datos NO salen de tu teléfono",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        lineHeight = 18.sp
+                    )
+                    
+                    Spacer(Modifier.height(16.dp))
+                    
+                    Button(
+                        onClick = onRequestPermissions,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF2196F3)
+                        )
+                    ) {
+                        Text("Conceder permisos en Ajustes")
+                    }
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+        }
+        
+        // Control de monitorización
+        GuardianShieldControlCard(
+            isActive = isServiceActive,
+            onToggle = { shouldActivate ->
+                if (shouldActivate) {
+                    // Verificar y solicitar permiso de notificaciones en Android 13+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        if (context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) 
+                            != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                            Toast.makeText(
+                                context,
+                                "⚠️ Activa notificaciones en Ajustes para recibir alertas",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            try {
+                                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                }
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                // Fallback
+                            }
+                        }
+                    }
+                    
+                    monitor.startMonitoring()
+                    com.guardianos.core.monitor.GuardianShieldService.start(context)
+                    isServiceActive = true
+                    Toast.makeText(
+                        context,
+                        "✅ Guardian Shield activado",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    monitor.stopMonitoring()
+                    com.guardianos.core.monitor.GuardianShieldService.stop(context)
+                    isServiceActive = false
+                    Toast.makeText(
+                        context,
+                        "Guardian Shield desactivado",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            },
+            onRequestPermissions = {
+                // Abrir ajustes de uso de apps
+                try {
+                    context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                } catch (e: Exception) {
+                    Toast.makeText(
+                        context,
+                        "No se puede abrir ajustes automáticamente",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        )
+        
+        Spacer(Modifier.height(20.dp))
+        
+        // HISTORIAL GUARDADO: Única fuente de datos confiable
+        // (GuardianShieldService guarda detecciones en SharedPreferences)
+        Text(
+            text = "💾 Historial de Detecciones${if (savedHistory.isNotEmpty()) " (${savedHistory.size})" else ""}",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFF5D8BF4)
+        )
+        Spacer(Modifier.height(12.dp))
+        
+        if (savedHistory.isEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF5D8BF4).copy(alpha = 0.1f)
+                ),
+                border = BorderStroke(1.dp, Color(0xFF5D8BF4))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("ℹ️", fontSize = 28.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = "¿Cómo funciona Guardian Shield?",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF5D8BF4)
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    
+                    if (isServiceActive) {
+                        Text(
+                            text = "✓ Guardian Shield está ACTIVO\n\n" +
+                                   "🔍 Detecta apps cuando las ABRES:\n" +
+                                   "• Cada vez que abres una app (WhatsApp, Instagram, etc.)\n" +
+                                   "• Guardian Shield verifica qué permisos peligrosos tiene concedidos\n" +
+                                   "• Si tiene permisos sensibles (cámara, ubicación, micrófono), recibirás una notificación silenciosa\n\n" +
+                                   "💡 Prueba abriendo WhatsApp o cualquier app con permisos de cámara/ubicación para ver el sistema en acción.\n\n" +
+                                   "⚠️ NO es monitoreo histórico: solo detecta apps al abrirse (Android limita qué podemos ver sin root).",
+                            fontSize = 14.sp,
+                            color = Color.Gray,
+                            lineHeight = 20.sp
+                        )
+                    } else {
+                        Text(
+                            text = "❌ Guardian Shield está inactivo\n\n" +
+                                   "Activa el switch arriba para comenzar la monitorización en tiempo real.",
+                            fontSize = 14.sp,
+                            color = Color.Gray,
+                            lineHeight = 20.sp
+                        )
+                    }
+                }
+            }
+        } else {
+            // Mostrar todas las detecciones guardadas
+            savedHistory.forEach { entry ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF5D8BF4).copy(alpha = 0.08f)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = entry,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            lineHeight = 18.sp
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+        }
+        
+        // Botón para ver historial completo guardado (solo si se proporciona el callback)
+        if (onViewHistory != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF5D8BF4).copy(alpha = 0.15f)
+                ),
+                border = BorderStroke(1.dp, Color(0xFF5D8BF4))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onViewHistory() }
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "📚 Historial Completo",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF5D8BF4)
+                        )
+                        Text(
+                            text = "Ver todas las detecciones guardadas por GuardianShield",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                    Text("➡️", fontSize = 24.sp)
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+        }
+        
+        // Leyenda ética con límites técnicos
+        TechnicalLimitationsCard()
+        
+        Spacer(Modifier.height(16.dp))
+        
+        Button(
+            onClick = onBack,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary
+            )
+        ) {
+            Text("Volver")
+        }
+    }
+}
+
+@Composable
+private fun GuardianShieldControlCard(
+    isActive: Boolean,
+    onToggle: (Boolean) -> Unit,
+    onRequestPermissions: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isActive)
+                Color(0xFF4CAF50).copy(alpha = 0.15f)
+            else
+                MaterialTheme.colorScheme.surfaceVariant
+        ),
+        border = if (isActive) BorderStroke(2.dp, Color(0xFF4CAF50)) else null
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isActive) {
+                        Box(
+                            modifier = Modifier
+                                .size(12.dp)
+                                .background(Color(0xFF4CAF50), CircleShape)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(
+                        text = if (isActive) "🛡️ Guardian Shield ACTIVO" else "🛡️ Guardian Shield",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isActive) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = if (isActive) {
+                        "Monitorizando permisos en tiempo real"
+                    } else {
+                        "Activa para recibir alertas en tiempo real"
+                    },
+                    fontSize = 13.sp,
+                    color = Color.Gray
+                )
+            }
+            
+            Switch(
+                checked = isActive,
+                onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color(0xFF4CAF50),
+                    checkedTrackColor = Color(0xFF4CAF50).copy(alpha = 0.5f)
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun PermissionUsageCard(
+    usage: ActivePermissionUsage,
+    isRecent: Boolean,
+    isActive: Boolean
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = when {
+                isActive -> Color(0xFF5D8BF4).copy(alpha = 0.2f) // Azul ético destacado
+                isRecent -> Color(0xFF5D8BF4).copy(alpha = 0.1f)
+                else -> MaterialTheme.colorScheme.surface
+            }
+        ),
+        border = if (isActive) BorderStroke(2.dp, Color(0xFF5D8BF4)) else null
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Icono del permiso
+            Text(
+                text = usage.permissionType.icon(),
+                fontSize = 28.sp
+            )
+            
+            Spacer(Modifier.width(12.dp))
+            
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = usage.appName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                    )
+                    if (isActive) {
+                        Spacer(Modifier.width(6.dp))
+                        Surface(
+                            color = Color(0xFF5D8BF4),
+                            shape = MaterialTheme.shapes.small
+                        ) {
+                            Text(
+                                text = "AHORA",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(4.dp))
+                
+                Text(
+                    text = "${usage.permissionType.humanReadable()}${if (usage.durationMs > 0) " • ${formatDuration(usage.durationMs)}" else ""}",
+                    fontSize = 12.sp,
+                    color = Color.Gray
+                )
+                
+                if (!usage.isForeground) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "⚠️ En segundo plano",
+                        fontSize = 11.sp,
+                        color = Color(0xFFFBBF24), // Amarillo ético (no rojo alarmista)
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            
+            // Timestamp
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = getTimeAgo(usage.timestamp),
+                    fontSize = 11.sp,
+                    color = Color.Gray
+                )
+                if (!usage.isActive && usage.durationMs > 0) {
+                    Text(
+                        text = "Finalizado",
+                        fontSize = 10.sp,
+                        color = Color.Gray
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyStateCard(icon: String, title: String, description: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(icon, fontSize = 48.sp)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = title,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = description,
+                fontSize = 13.sp,
+                color = Color.Gray,
+                textAlign = TextAlign.Center,
+                lineHeight = 18.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun TechnicalLimitationsCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = "ℹ️ Límites técnicos transparentes",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF5D8BF4)
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = "• Android limita qué apps pueden ver otros permisos en uso (sin root no vemos apps específicas usando micrófono/cámara en algunos casos)\n\n" +
+                       "• Solo mostramos permisos REALMENTE concedidos (no solo declarados en el manifest)\n\n" +
+                       "• La precisión depende de los permisos que concedas a GuardianOS en Ajustes\n\n" +
+                       "• Nunca usamos AccessibilityService (respetamos tu privacidad)\n\n" +
+                       "• Monitorización cada 2 segundos (balance entre precisión y batería)",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 18.sp
+            )
+        }
+    }
+}
+
+// Helpers
+private fun formatDuration(durationMs: Long): String {
+    val seconds = (durationMs / 1000).toInt()
+    return when {
+        seconds < 60 -> "${seconds}s"
+        seconds < 3600 -> "${seconds / 60}m ${seconds % 60}s"
+        else -> "${seconds / 3600}h ${(seconds % 3600) / 60}m"
+    }
+}
+
+private fun getTimeAgo(timestamp: Long): String {
+    val diff = System.currentTimeMillis() - timestamp
+    val seconds = (diff / 1000).toInt()
+    
+    return when {
+        seconds < 5 -> "Ahora"
+        seconds < 60 -> "Hace ${seconds}s"
+        seconds < 3600 -> "Hace ${seconds / 60}m"
+        seconds < 86400 -> "Hace ${seconds / 3600}h"
+        else -> SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
+    }
+}
+
+@Composable
+private fun PermissionInfoItem(
+    icon: String,
+    title: String,
+    description: String,
+    isGranted: Boolean?
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(icon, fontSize = 20.sp)
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = description,
+                fontSize = 12.sp,
+                color = Color.Gray,
+                lineHeight = 16.sp
+            )
+        }
+        if (isGranted != null) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = if (isGranted) "✅" else "⏳",
+                fontSize = 18.sp
+            )
+        }
+    }
+}

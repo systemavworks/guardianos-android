@@ -1,23 +1,68 @@
-# Android / Gradle
+# Gradle
 .gradle/
-build/
-app/build/
-*.apk
-*.ap_
-*.jks
-*.keystore
+**/build/
+*.bin
+*.lock
+cache.properties
+file-system.probe
+
+# Local configuration
+local.properties
 
 # IDE
 .idea/
 *.iml
-.DS_Store
+*.ipr
+*.iws
+.vscode/
+.kotlin/
 
-# Fastlane (opcional, pero no necesario ignorar)
-# fastlane/
+# Logs
+*.log
+*.hprof
 
-# Otros
-/local.properties
-/captures/
+# APKs y archivos binarios
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+
+# Keystore y certificados
+*.jks
+*.keystore
+*.p12
+*.key
+*.pem
+
+# API Keys y secretos (CRÍTICO)
+**/apikeys.properties
+**/secrets.properties
+google-services.json
+firebase.json
 
 # Backups
-fdroid-backup-*
+*-backup-*/
+*.BAK
+*.bak
+*.backup
+
+# Archivos temporales
+*.tmp
+*.temp
+*.swp
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.directory
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini

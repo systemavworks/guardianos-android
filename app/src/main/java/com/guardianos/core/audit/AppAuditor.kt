@@ -7,7 +7,13 @@ import android.content.pm.PackageManager
 import android.content.pm.Signature
 import android.os.Build
 import android.provider.Settings
+import android.util.Log
 import com.guardianos.core.data.MalwareDatabase
+import com.guardianos.core.audit.detector.StalkerwareDetector
+import com.guardianos.core.audit.detector.RiskScorer
+import com.guardianos.core.audit.detector.AccessibilityMonitor
+import com.guardianos.core.audit.detector.HiddenAppsDetector
+import com.guardianos.core.audit.detector.BackgroundServicesAnalyzer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -15,19 +21,32 @@ import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.util.Date
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipFile
 import kotlin.math.min
 
+/**
+ * Motor de auditoría de seguridad de aplicaciones.
+ * Implementa análisis en múltiples capas con optimizaciones de rendimiento.
+ */
 class AppAuditor(
     private val malwareDatabase: MalwareDatabase = MalwareDatabase()
 ) {
+    private val TAG = "AppAuditor"
+    // Caché de hashes de certificados para evitar cálculos repetidos
+    private val certificateHashCache = ConcurrentHashMap<String, String>()
 
     suspend fun auditApps(
         context: Context,
         mode: AuditMode
     ): List<AppAudit> = withContext(Dispatchers.Default) {
         val pm = context.packageManager
-        pm.getInstalledApplications(PackageManager.GET_META_DATA).mapNotNull { app ->
+        val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        
+        Log.d(TAG, "Iniciando auditoría de ${apps.size} aplicaciones en modo $mode")
+        val startTime = System.currentTimeMillis()
+        
+        val results = apps.mapNotNull { app ->
             try {
                 val pkg = pm.getPackageInfo(
                     app.packageName,
@@ -41,6 +60,7 @@ class AppAuditor(
 
                 // 🔒 Excluir overlays y recursos del sistema
                 if (isSystemOverlayOrResource(app.packageName, apkPath)) {
+                    Log.v(TAG, "Excluyendo overlay/recurso del sistema: ${app.packageName}")
                     return@mapNotNull AppAudit(
                         appName = pm.getApplicationLabel(app).toString(),
                         packageName = app.packageName,
@@ -103,6 +123,53 @@ class AppAuditor(
                     score += iocCheck.score
                 }
 
+                // 🔴 CAPA 5: STALKERWARE DETECTION 2.0 (solo FULL/PRO)
+                // Sistema unificado con AccessibilityMonitor + HiddenAppsDetector + BackgroundServicesAnalyzer
+                if (mode == AuditMode.FULL) {
+                    try {
+                        // Crear instancias de los detectores
+                        val accessibilityMonitor = AccessibilityMonitor(context)
+                        val hiddenAppsDetector = HiddenAppsDetector(context)
+                        val servicesAnalyzer = BackgroundServicesAnalyzer(context)
+                        
+                        // Obtener reportes de los 3 detectores
+                        val accessibilityReports = accessibilityMonitor.scanAccessibilityServices()
+                            .associateBy { it.packageName }
+                        val hiddenAppReports = hiddenAppsDetector.scanHiddenApps()
+                            .associateBy { it.packageName }
+                        val serviceReports = servicesAnalyzer.analyzeBackgroundServices()
+                            .associateBy { it.packageName }
+                        
+                        // Calcular score stalkerware para esta app
+                        val stalkerwareReport = RiskScorer.calculateStalkerwareRisk(
+                            context,
+                            app.packageName,
+                            accessibilityReports[app.packageName],
+                            hiddenAppReports[app.packageName],
+                            serviceReports[app.packageName]
+                        )
+                        
+                        // Solo añadir findings si hay riesgo detectado
+                        if (stalkerwareReport.riskLevel != RiskScorer.StalkerwareRiskLevel.SAFE) {
+                            findings.add(AuditFinding(
+                                title = when (stalkerwareReport.riskLevel) {
+                                    RiskScorer.StalkerwareRiskLevel.STALKERWARE_CONFIRMED -> "🚨 STALKERWARE CONFIRMADO"
+                                    RiskScorer.StalkerwareRiskLevel.HIGH_SUSPICION -> "⚠️ SOSPECHA ALTA DE STALKERWARE"
+                                    RiskScorer.StalkerwareRiskLevel.MEDIUM -> "⚠️ COMPORTAMIENTO SOSPECHOSO"
+                                    else -> "ℹ️ RIESGO BAJO"
+                                },
+                                description = "Puntuación: ${stalkerwareReport.totalScore}/100\n" +
+                                            "Comportamientos detectados:\n${stalkerwareReport.behaviorFlags.joinToString("\n")}\n\n" +
+                                            stalkerwareReport.recommendedAction,
+                                weight = stalkerwareReport.totalScore
+                            ))
+                            score += stalkerwareReport.totalScore
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error en detección stalkerware para ${app.packageName}: ${e.message}")
+                    }
+                }
+
                 // Penalizaciones adicionales
                 if (source == InstallSource.UNKNOWN && dangerousPerms.size > 3) {
                     findings.add(AuditFinding(
@@ -134,9 +201,15 @@ class AppAuditor(
                     risk = risk
                 )
             } catch (e: Exception) {
+                Log.w(TAG, "Error auditando ${app.packageName}: ${e.message}")
                 null
             }
         }.sortedByDescending { it.riskScore }
+        
+        val duration = System.currentTimeMillis() - startTime
+        Log.d(TAG, "Auditoría completada: ${results.size} apps analizadas en ${duration}ms")
+        
+        results
     }
 
     suspend fun auditSystem(context: Context): List<AuditFinding> = withContext(Dispatchers.Default) {
@@ -173,32 +246,53 @@ class AppAuditor(
     /* ─── FUNCIONES AUXILIARES ─── */
 
     private fun isSystemOverlayOrResource(packageName: String, apkPath: String?): Boolean {
-        // Detectar por nombre de paquete
-        if (packageName.startsWith("android.") ||
-            packageName.startsWith("com.android.") ||
-            packageName.startsWith("com.google.android.overlay") ||
-            packageName.contains(".overlay") ||
-            packageName.contains("frameworkres") ||
-            packageName.contains("resources") ||
-            packageName.contains("permissioncontroller") ||
-            packageName.contains("connectivity") ||
-            packageName.contains("media.module") ||
-            packageName.contains("wifiresources") ||
-            packageName.contains("cellbroadcast") ||
-            packageName.contains("healthfitness") ||
-            packageName.contains("documentsui") ||
-            packageName.contains("ext.services")) {
+        // Detectar por nombre de paquete (lista ampliada)
+        val systemPrefixes = listOf(
+            "android.",
+            "com.android.",
+            "com.google.android.overlay",
+            "com.google.android.ext.",
+            "com.qualcomm.",
+            "com.qti."
+        )
+        
+        if (systemPrefixes.any { packageName.startsWith(it) }) {
+            return true
+        }
+        
+        // Detectar por palabras clave en el nombre
+        val systemKeywords = listOf(
+            ".overlay",
+            "frameworkres",
+            "resources",
+            "permissioncontroller",
+            "connectivity",
+            "media.module",
+            "wifiresources",
+            "cellbroadcast",
+            "healthfitness",
+            "documentsui",
+            "ext.services",
+            "captiveportal",
+            "networkstack"
+        )
+        
+        if (systemKeywords.any { packageName.contains(it, ignoreCase = true) }) {
             return true
         }
 
         // Detectar por ruta de APK
-        if (apkPath?.run {
-                startsWith("/system/") ||
-                startsWith("/product/") ||
-                startsWith("/apex/") ||
-                startsWith("/vendor/")
-            } == true) {
-            return true
+        apkPath?.let { path ->
+            val systemPaths = listOf(
+                "/system/",
+                "/product/",
+                "/apex/",
+                "/vendor/",
+                "/system_ext/"
+            )
+            if (systemPaths.any { path.startsWith(it) }) {
+                return true
+            }
         }
 
         return false
@@ -214,8 +308,14 @@ class AppAuditor(
                 @Suppress("DEPRECATION")
                 pkg.signatures
             }
+            
             signatures?.forEach { signature ->
-                val certHash = calculateSHA256(signature.toByteArray())
+                // Usar caché para evitar cálculos repetidos
+                val signatureKey = signature.toCharsString()
+                val certHash = certificateHashCache.getOrPut(signatureKey) {
+                    calculateSHA256(signature.toByteArray())
+                }
+                
                 val malwareMatch = malwareDatabase.checkCertificateHash(certHash)
                 if (malwareMatch != null) {
                     findings.add(AuditFinding(
@@ -224,7 +324,9 @@ class AppAuditor(
                         50
                     ))
                     score += 50
+                    Log.w(TAG, "Malware detectado en $packageName: ${malwareMatch.name}")
                 }
+                
                 if (certHash.startsWith("a40da80a") || isDebugCertificate(signature)) {
                     findings.add(AuditFinding(
                         "Certificado de desarrollo",
@@ -234,6 +336,7 @@ class AppAuditor(
                     score += 20
                 }
             }
+            
             val packageMatch = malwareDatabase.checkPackageName(packageName)
             if (packageMatch != null) {
                 findings.add(AuditFinding(
@@ -242,9 +345,10 @@ class AppAuditor(
                     50
                 ))
                 score += 50
+                Log.w(TAG, "Paquete malicioso detectado: $packageName - ${packageMatch.name}")
             }
         } catch (e: Exception) {
-            // ignore
+            Log.e(TAG, "Error verificando firmas de $packageName", e)
         }
         return SecurityCheckResult(findings, score)
     }
